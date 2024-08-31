@@ -48,6 +48,7 @@ class PlatformWindowBase {
   T *self() { return static_cast<T*>(this); }   
   Point HandleMouseDragOrSize(int dx, int dy, bool snap);
 
+  int id_;
   bool double_size_;
   bool always_on_top_;
   bool active_window_;

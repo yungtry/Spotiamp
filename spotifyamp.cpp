@@ -369,6 +369,12 @@ bool MainWindow::Load() {
   InitThreading();
   RegisterForGlobalHotkeys();
 
+  std::string leftKey("window_"+std::to_string(id_)+"_l");
+  std::string topKey("window_"+std::to_string(id_)+"_t");
+  int left(PrefReadInt(0, leftKey.c_str()));
+  int top(PrefReadInt(0, topKey.c_str()));
+  Move(left, top);
+
   bool compact = PrefReadBool(false, "compact");
   compact_ = !compact;
   SetCompact(compact);
@@ -1514,6 +1520,7 @@ void MainWindow::GlobalHotkey(int id) {
 // PLAYLIST WINDOW
 ///////////////////////////////////////////////////////////
 PlaylistWindow::PlaylistWindow(MainWindow *main_window) {
+  id_ = 1;
   main_window_ = main_window;
   hover_button_ = -1;
   Resize(WND_MAIN_W, WND_MAIN_H * 3);
@@ -1524,6 +1531,12 @@ PlaylistWindow::~PlaylistWindow() {
 }
 
 void PlaylistWindow::Load() {
+  std::string leftKey("window_"+std::to_string(id_)+"_l");
+  std::string topKey("window_"+std::to_string(id_)+"_t");
+  int left(PrefReadInt(0, leftKey.c_str()));
+  int top(PrefReadInt(0, topKey.c_str()));
+  Move(left, top);
+  
   SetCompact(PrefReadBool(false, "pl.compact"));
   font_size_ = PrefReadInt(10, "pl.font_size");
   row_height_ = 13;
@@ -1997,6 +2010,7 @@ void PlaylistWindow::Perform(int cmd) {
 // EQUALIZER WINDOW
 ///////////////////////////////////////////////////////////
 EqWindow::EqWindow(MainWindow *main_window) {
+  id_ = 2;
   main_window_ = main_window;
   hover_button_ = -1;
   hover_eq_ = -1;
@@ -2013,6 +2027,12 @@ void EqWindow::Load() {
   auto_enabled_ = PrefReadInt(0, "eq.auto") != 0;
   gain_mode_ = PrefReadInt(0, "eq.gain_mode");
   CopyToTsp();
+
+  std::string leftKey("window_"+std::to_string(id_)+"_l");
+  std::string topKey("window_"+std::to_string(id_)+"_t");
+  int left(PrefReadInt(0, leftKey.c_str()));
+  int top(PrefReadInt(0, topKey.c_str()));
+  Move(left, top);
 
   SetCompact(PrefReadBool(false, "eq.compact"));
 }
@@ -2375,6 +2395,7 @@ void EqWindow::ShowPresets() {
 
 
 GenWindow::GenWindow() {
+  id_ = 3;
   hover_button_ = -1;
   left_button_down_ = false;
   Resize(275, 116*2+29);
@@ -2528,6 +2549,7 @@ void GenWindow::Paint() {
 ///////////////////////////////////////////////////////////
 
 CoverArtWindow::CoverArtWindow(MainWindow *main_window) {
+  id_ = 4;
   main_window_ = main_window;
   image_needs_load_ = false;
   bitmap_ = NULL;
@@ -2597,6 +2619,12 @@ void CoverArtWindow::SetImage(const char* image) {
 
 void CoverArtWindow::Load() {
 	if (image_ == "") { return; }
+
+  std::string leftKey("window_"+std::to_string(id_)+"_l");
+  std::string topKey("window_"+std::to_string(id_)+"_t");
+  int left(PrefReadInt(0, leftKey.c_str()));
+  int top(PrefReadInt(0, topKey.c_str()));
+  Move(left, top);
 
 	PlatformDeleteBitmap(bitmap_);
 	bitmap_ = PlatformLoadBitmapFromBuf(buffer_.data(), buffer_.size());
@@ -2679,10 +2707,6 @@ PlatformWindow *InitSpotamp(int argc, char **argv) {
 
   if (!main_window.Load())
     return NULL;
-
-  playlist_window.Move(main_window.screen_rect()->left, main_window.screen_rect()->bottom);
-  eq_window.Move(main_window.screen_rect()->right, main_window.screen_rect()->top);
-  coverart_window.Move(main_window.screen_rect()->right, main_window.screen_rect()->bottom);
 
   eq_window.Load();
   playlist_window.Load();
