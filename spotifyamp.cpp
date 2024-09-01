@@ -369,11 +369,7 @@ bool MainWindow::Load() {
   InitThreading();
   RegisterForGlobalHotkeys();
 
-  std::string leftKey("window_"+std::to_string(id_)+"_l");
-  std::string topKey("window_"+std::to_string(id_)+"_t");
-  int left(PrefReadInt(0, leftKey.c_str()));
-  int top(PrefReadInt(0, topKey.c_str()));
-  Move(left, top);
+  LoadPosition(0, 0);
 
   bool compact = PrefReadBool(false, "compact");
   compact_ = !compact;
@@ -851,8 +847,6 @@ void MainWindow::Paint() {
 
 void MainWindow::SetDoubleSize(bool v) {
   PlatformWindow::SetDoubleSize(v);
-  eq_window_->SetDoubleSize(v);
-  PrefWriteInt(v, "double_size");
   SetVisualizer(24, 43, 76, 16);
 }
 
@@ -986,7 +980,12 @@ void MainWindow::Perform(int cmd) {
     if (const char *s = PlatformReadClipboard())
       TspPlayerPlayContext(tsp_, s, NULL, 0);
     break;
-  case CMD_DOUBLE_SIZE: SetDoubleSize(!double_size()); break;
+  case CMD_DOUBLE_SIZE: { 
+    bool is_double_size(!double_size());
+    PrefWriteInt(is_double_size, "double_size");
+    SetDoubleSize(is_double_size); 
+    eq_window_->SetDoubleSize(is_double_size);
+    } break;
   case CMD_ALWAYS_ON_TOP: SetAlwaysOnTop(!always_on_top()); break;
   case CMD_COMPACT: SetCompact(!compact_); break;
   case CMD_LOGIN: ShowLoginDialog(); break;
@@ -1531,12 +1530,7 @@ PlaylistWindow::~PlaylistWindow() {
 }
 
 void PlaylistWindow::Load() {
-  std::string leftKey("window_"+std::to_string(id_)+"_l");
-  std::string topKey("window_"+std::to_string(id_)+"_t");
-  int left(PrefReadInt(0, leftKey.c_str()));
-  int top(PrefReadInt(0, topKey.c_str()));
-  Move(left, top);
-  
+  LoadPosition(main_window.screen_rect()->left, main_window.screen_rect()->bottom);
   SetCompact(PrefReadBool(false, "pl.compact"));
   font_size_ = PrefReadInt(10, "pl.font_size");
   row_height_ = 13;
@@ -2028,12 +2022,8 @@ void EqWindow::Load() {
   gain_mode_ = PrefReadInt(0, "eq.gain_mode");
   CopyToTsp();
 
-  std::string leftKey("window_"+std::to_string(id_)+"_l");
-  std::string topKey("window_"+std::to_string(id_)+"_t");
-  int left(PrefReadInt(0, leftKey.c_str()));
-  int top(PrefReadInt(0, topKey.c_str()));
-  Move(left, top);
-
+  LoadPosition(main_window.screen_rect()->right, main_window.screen_rect()->top);
+  SetDoubleSize(PrefReadBool(false, "double_size"));
   SetCompact(PrefReadBool(false, "eq.compact"));
 }
 
@@ -2618,13 +2608,8 @@ void CoverArtWindow::SetImage(const char* image) {
 #include <vector>
 
 void CoverArtWindow::Load() {
+  LoadPosition(main_window.screen_rect()->right, main_window.screen_rect()->bottom);
 	if (image_ == "") { return; }
-
-  std::string leftKey("window_"+std::to_string(id_)+"_l");
-  std::string topKey("window_"+std::to_string(id_)+"_t");
-  int left(PrefReadInt(0, leftKey.c_str()));
-  int top(PrefReadInt(0, topKey.c_str()));
-  Move(left, top);
 
 	PlatformDeleteBitmap(bitmap_);
 	bitmap_ = PlatformLoadBitmapFromBuf(buffer_.data(), buffer_.size());
@@ -2710,6 +2695,7 @@ PlatformWindow *InitSpotamp(int argc, char **argv) {
 
   eq_window.Load();
   playlist_window.Load();
+  coverart_window.Load();
 
   InitVisualizer();
 

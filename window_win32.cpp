@@ -248,10 +248,7 @@ void PlatformWindow::MoveAllWindows() {
                       r->left, r->top,
                       r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
       w->need_move_ = false;
-      std::string leftKey("window_"+std::to_string(w->id_)+"_l");
-      std::string topKey("window_"+std::to_string(w->id_)+"_t");
-      PrefWriteInt(r->left, leftKey.c_str());
-      PrefWriteInt(r->top, topKey.c_str());
+      w->SavePosition();
     }
   }
   EndDeferWindowPos(dp);
