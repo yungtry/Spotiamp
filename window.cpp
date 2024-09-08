@@ -175,6 +175,29 @@ void PlatformWindowBase<PlatformWindow>::Create(PlatformWindow *owner_window) {
 
 
 template<>
+const char *PlatformWindowBase<PlatformWindow>::GetPositionKey(const char *side) {
+  static char leftKey[12]; 
+  snprintf(leftKey, sizeof(leftKey), "window_%d_%s", id_, side);
+  return leftKey;
+}
+
+
+template<>
+void PlatformWindowBase<PlatformWindow>::SavePosition() {
+  PrefWriteInt(screen_rect_.left, GetPositionKey("l"));
+  PrefWriteInt(screen_rect_.top, GetPositionKey("t"));
+}
+
+
+template<>
+void PlatformWindowBase<PlatformWindow>::LoadPosition(int def_left, int def_top) {
+  int left(PrefReadInt(def_left, GetPositionKey("l")));
+  int top(PrefReadInt(def_top, GetPositionKey("t")));
+  Move(left, top);
+}
+
+
+template<>
 void PlatformWindowBase<PlatformWindow>::SetDoubleSize(bool v) {
   if (v != double_size_) {
     double_size_ = v;

@@ -294,6 +294,7 @@ public:
 	explicit CoverArtWindow(MainWindow* main_window);
 	virtual ~CoverArtWindow();
 
+	void Load();
 	virtual void Paint();
 	virtual void OnClose();
 
@@ -302,7 +303,6 @@ public:
 	void GotImagePart(TspImageDownloadResult* part);
 
 private:
-	void Load();
 
 	MainWindow* main_window_;
 	std::string image_;

@@ -17,6 +17,9 @@ class PlatformWindowBase {
 
   void Create(T *owner_window);
 
+  void SavePosition();
+  void LoadPosition(int def_left, int def_top);
+
   // Double all pixels
   void SetDoubleSize(bool v);
   bool double_size() const { return double_size_; }
@@ -29,6 +32,8 @@ class PlatformWindowBase {
   
   void SetVisible(bool visible);
   bool visible() const { return visible_; }
+
+  virtual void Move(int l, int t) {}
 
   // Resize window. If you're in doublesize mode, these still return the normal sized size.
   void Resize(int w, int h);
@@ -48,6 +53,7 @@ class PlatformWindowBase {
   T *self() { return static_cast<T*>(this); }   
   Point HandleMouseDragOrSize(int dx, int dy, bool snap);
 
+  int id_;
   bool double_size_;
   bool always_on_top_;
   bool active_window_;
@@ -57,6 +63,8 @@ class PlatformWindowBase {
   int width_, height_;
   Rect screen_rect_;
   T *next_, *owner_;
+ private:
+  const char *GetPositionKey(const char *side);
 };
 
 #if defined(WITH_SDL)
