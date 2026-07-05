@@ -33,6 +33,7 @@ static WNDPROC old_combo_proc;
 static int suggent, sugglen;
 static HWND searchhwnd;
 static std::string *g_username, *g_password, *g_search_q;
+static const char *g_input_title, *g_input_message, *g_input_default;
 static Tsp *g_tsp;
 //IDC_SEARCH
 
@@ -86,6 +87,12 @@ static BOOL WINAPI SearchDialogFunc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lp
   switch(msg) {
   case WM_INITDIALOG: {
     searchhwnd = wnd;
+    if (g_input_title && g_input_title[0])
+      SetWindowTextA(wnd, g_input_title);
+    if (g_input_default && g_input_default[0])
+      SetWindowString(wnd, IDC_SEARCH, g_input_default);
+    if (!g_tsp)
+      return TRUE;
     HWND combo = GetDlgItem(wnd, IDC_SEARCH);
     HWND edit = FindWindowEx(combo, 0,NULL,NULL);
     old_combo_proc = (WNDPROC)SetWindowLong(edit, GWL_WNDPROC, (LONG)&ComboSubclass);
@@ -139,8 +146,32 @@ bool ShowLoginDialog(PlatformWindow *parent, std::string *username, std::string 
 std::string ShowSearchDialog(PlatformWindow *parent, Tsp *tsp) {
   std::string searchq;
   g_search_q = &searchq;
+  g_input_title = NULL;
+  g_input_message = NULL;
+  g_input_default = NULL;
   g_tsp = tsp;
   DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SEARCH), parent->handle(), SearchDialogFunc);
   g_search_q = NULL;
+  g_tsp = NULL;
   return searchq;
+}
+
+std::string ShowTextInputDialog(PlatformWindow *parent, const char *title,
+                                const char *message, const char *default_value) {
+  std::string value;
+  if (message && message[0])
+    MessageBoxA(parent ? parent->handle() : NULL, message, title ? title : "Spotiamp",
+                MB_OK | MB_ICONINFORMATION);
+  g_search_q = &value;
+  g_input_title = title;
+  g_input_message = message;
+  g_input_default = default_value;
+  g_tsp = NULL;
+  DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_SEARCH),
+            parent ? parent->handle() : NULL, SearchDialogFunc);
+  g_search_q = NULL;
+  g_input_title = NULL;
+  g_input_message = NULL;
+  g_input_default = NULL;
+  return value;
 }

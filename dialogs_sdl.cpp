@@ -29,6 +29,18 @@ static bool CommandExists(const char *name) {
   return system(cmd.c_str()) == 0;
 }
 
+static std::string ShellQuote(const std::string &s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += "'";
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // macOS helper (kept for the non-bundle macOS build that uses this file)
 // ---------------------------------------------------------------------------
@@ -118,7 +130,7 @@ static std::string ShowSearchDialog_Zenity(const std::string &current) {
     "zenity --entry"
     " --title='Spotiamp Search'"
     " --text='Enter search query:'"
-    " --entry-text='" + current + "'"
+    " --entry-text=" + ShellQuote(current) +
     " 2>/dev/null";
   return RunAndCapture(cmd.c_str());
 }
@@ -126,7 +138,27 @@ static std::string ShowSearchDialog_Zenity(const std::string &current) {
 static std::string ShowSearchDialog_Kdialog(const std::string &current) {
   std::string cmd =
     "kdialog --title 'Spotiamp Search'"
-    " --inputbox 'Search query:' '" + current + "' 2>/dev/null";
+    " --inputbox 'Search query:' " + ShellQuote(current) + " 2>/dev/null";
+  return RunAndCapture(cmd.c_str());
+}
+
+static std::string ShowTextInputDialog_Zenity(const char *title, const char *message,
+                                              const char *default_value) {
+  std::string cmd =
+    "zenity --entry"
+    " --title=" + ShellQuote(title ? title : "Spotiamp") +
+    " --text=" + ShellQuote(message ? message : "") +
+    " --entry-text=" + ShellQuote(default_value ? default_value : "") +
+    " 2>/dev/null";
+  return RunAndCapture(cmd.c_str());
+}
+
+static std::string ShowTextInputDialog_Kdialog(const char *title, const char *message,
+                                               const char *default_value) {
+  std::string cmd =
+    "kdialog --title " + ShellQuote(title ? title : "Spotiamp") +
+    " --inputbox " + ShellQuote(message ? message : "") + " " +
+    ShellQuote(default_value ? default_value : "") + " 2>/dev/null";
   return RunAndCapture(cmd.c_str());
 }
 #endif // __linux__
@@ -190,6 +222,36 @@ std::string ShowSearchDialog(PlatformWindow *parent, Tsp *tsp) {
   std::cout << "Enter search query: ";
   std::string q;
   std::cin >> q;
+  return q;
+#endif
+}
+
+std::string ShowTextInputDialog(PlatformWindow *parent, const char *title,
+                                const char *message, const char *default_value) {
+#if defined(__APPLE__)
+  return ShowMacPrompt(message ? message : "", default_value ? default_value : "");
+
+#elif defined(__linux__)
+  if (CommandExists("zenity"))
+    return ShowTextInputDialog_Zenity(title, message, default_value);
+  if (CommandExists("kdialog"))
+    return ShowTextInputDialog_Kdialog(title, message, default_value);
+
+  std::cout << "\n=== " << (title ? title : "Spotiamp") << " ===" << std::endl;
+  if (message && message[0])
+    std::cout << message << std::endl;
+  std::cout << "> ";
+  std::string q;
+  std::getline(std::cin >> std::ws, q);
+  return q;
+
+#else
+  std::cout << "\n=== " << (title ? title : "Spotiamp") << " ===" << std::endl;
+  if (message && message[0])
+    std::cout << message << std::endl;
+  std::cout << "> ";
+  std::string q;
+  std::getline(std::cin >> std::ws, q);
   return q;
 #endif
 }

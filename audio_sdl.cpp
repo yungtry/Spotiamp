@@ -27,6 +27,8 @@ static void SdlAudioCallback(void *userdata, Uint8 *stream, int len) {
     std::lock_guard<std::mutex> lock(g_audio_mutex);
     int bytes_to_copy = (int)g_audio_buffer.size();
     if (bytes_to_copy > len) bytes_to_copy = len;
+    int frame_bytes = (int)sizeof(int16_t) * (g_audio_channels ? g_audio_channels : 1);
+    bytes_to_copy -= bytes_to_copy % frame_bytes;
     if (bytes_to_copy <= 0) return;
 
     int volume = g_volume.load();
@@ -101,7 +103,9 @@ TSP_PUBLIC int WavPush(void *context, int flags, const TspSampleType *data, int 
         g_audio_buffer.clear();
     }
 
-    if (flags & kTspAudioFlag_Pause) {
+    bool paused = (flags & kTspAudioFlag_Pause) != 0;
+
+    if (paused) {
         if (g_audio_device) {
             SDL_PauseAudioDevice(g_audio_device, 1);
         }
@@ -109,6 +113,16 @@ TSP_PUBLIC int WavPush(void *context, int flags, const TspSampleType *data, int 
         if (g_audio_device) {
             SDL_PauseAudioDevice(g_audio_device, 0);
         }
+    }
+
+    int byte_size = size * sizeof(TspSampleType);
+    if (byte_size <= 0 || !data) {
+        if (samples_buffered) {
+            std::lock_guard<std::mutex> lock(g_audio_mutex);
+            int channels = g_audio_channels ? g_audio_channels : 1;
+            *samples_buffered = (int)(g_audio_buffer.size() / sizeof(TspSampleType) / channels);
+        }
+        return 0;
     }
 
     // Reopen device if format (sample rate or channels) changes
@@ -137,10 +151,18 @@ TSP_PUBLIC int WavPush(void *context, int flags, const TspSampleType *data, int 
             std::lock_guard<std::mutex> lock(g_audio_mutex);
             g_audio_buffer.clear();
         }
-        SDL_PauseAudioDevice(g_audio_device, 0);
+        SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
     }
     
-    int byte_size = size * sizeof(TspSampleType);
+    if (paused) {
+        if (samples_buffered) {
+            std::lock_guard<std::mutex> lock(g_audio_mutex);
+            int channels = g_audio_channels ? g_audio_channels : 1;
+            *samples_buffered = (int)(g_audio_buffer.size() / sizeof(TspSampleType) / channels);
+        }
+        return 0;
+    }
+
     if (byte_size > 0 && data) {
         std::lock_guard<std::mutex> lock(g_audio_mutex);
         size_t max_buffer = (size_t)g_audio_sample_rate * (size_t)g_audio_channels *

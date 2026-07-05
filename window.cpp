@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <map>
 #include <string>
+#include <iostream>
+#if !defined(_MSC_VER)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #ifdef _MSC_VER
 #include <Shlobj.h>
 #endif
@@ -433,10 +438,59 @@ void PrefWriteStr(const char *v, const char *name, ...) {
 static char inifile[MAX_PATH + 100];
 extern char exepath[MAX_PATH];
 
+const char *GetIniFilePath(){return inifile;}
+
 static std::string FormatPrefName(const char *name, va_list va) {
   char buf[256];
   vsnprintf(buf, sizeof(buf), name, va);
   return buf;
+}
+
+static bool FileExists(const std::string &path) {
+  struct stat st;
+  return stat(path.c_str(), &st) == 0;
+}
+
+static void EnsureDir(const std::string &path) {
+  if (path.empty())
+    return;
+  std::string partial;
+  size_t start = 0;
+  if (path[0] == '/') {
+    partial = "/";
+    start = 1;
+  }
+  while (start < path.size()) {
+    size_t slash = path.find('/', start);
+    std::string part = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+    if (!part.empty()) {
+      if (!partial.empty() && partial.back() != '/')
+        partial += '/';
+      partial += part;
+      mkdir(partial.c_str(), 0755);
+    }
+    if (slash == std::string::npos)
+      break;
+    start = slash + 1;
+  }
+}
+
+static bool CopyFileContents(const std::string &from, const std::string &to) {
+  FILE *in = fopen(from.c_str(), "rb");
+  if (!in)
+    return false;
+  FILE *out = fopen(to.c_str(), "wb");
+  if (!out) {
+    fclose(in);
+    return false;
+  }
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    fwrite(buf, 1, n, out);
+  fclose(out);
+  fclose(in);
+  return true;
 }
 
 static std::map<std::string, std::string> ReadPrefs() {
@@ -482,10 +536,40 @@ static void WritePrefs(const std::map<std::string, std::string> &prefs) {
 }
 
 void PrefInit() {
-  snprintf(inifile, sizeof(inifile), "%sSpotiamp.ini", exepath);
+  std::string local_ini = std::string(exepath) + "Spotiamp.ini";
+  std::string pref_dir;
+  const char *home = getenv("HOME");
+#if defined(__APPLE__)
+  if (home && home[0])
+    pref_dir = std::string(home) + "/Library/Application Support/Spotiamp";
+#else
+  const char *xdg_config = getenv("XDG_CONFIG_HOME");
+  if (xdg_config && xdg_config[0])
+    pref_dir = std::string(xdg_config) + "/spotiamp";
+  else if (home && home[0])
+    pref_dir = std::string(home) + "/.config/spotiamp";
+#endif
+
+  if (!pref_dir.empty()) {
+    EnsureDir(pref_dir);
+    snprintf(inifile, sizeof(inifile), "%s/Spotiamp.ini", pref_dir.c_str());
+  } else {
+    snprintf(inifile, sizeof(inifile), "%s", local_ini.c_str());
+  }
+
+  bool had_new_ini = FileExists(inifile);
   FILE *f = fopen(inifile, "ab");
-  if (f)
+  if (f) {
     fclose(f);
+    if (!had_new_ini && local_ini != inifile && FileExists(local_ini))
+      CopyFileContents(local_ini, inifile);
+  } else {
+    snprintf(inifile, sizeof(inifile), "%s", local_ini.c_str());
+    f = fopen(inifile, "ab");
+    if (f)
+      fclose(f);
+  }
+  std::cout << "[DEBUG] PrefInit: ini = " << inifile << std::endl;
 }
 
 int PrefReadInt(int def, const char *name, ...) {

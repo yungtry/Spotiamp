@@ -80,6 +80,32 @@ std::string ShowSearchDialog(PlatformWindow *parent, Tsp *tsp) {
   }
 }
 
+std::string ShowTextInputDialog(PlatformWindow *parent, const char *title,
+                                const char *message, const char *default_value) {
+  @autoreleasepool {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:[NSString stringWithUTF8String:title ? title : "Spotiamp"]];
+    if (message && message[0])
+      [alert setInformativeText:[NSString stringWithUTF8String:message]];
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 420, 22)];
+    [[field cell] setPlaceholderString:@"Spotify playlist link"];
+    if (default_value)
+      [field setStringValue:[NSString stringWithUTF8String:default_value]];
+
+    [alert setAccessoryView:field];
+
+    [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+
+    NSInteger button = [alert runModal];
+    if (button == NSAlertFirstButtonReturn)
+      return [[field stringValue] UTF8String];
+    return "";
+  }
+}
+
 void AutoCompleteCopy() {
 }
 

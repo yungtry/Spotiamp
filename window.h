@@ -97,6 +97,7 @@ void SnapToScreenEdges(PlatformWindow **ws, int nw, int *dxp, int *dyp);
 void HandleWindowResized(PlatformWindow *wnd, int w, int h);
 
 void PrefInit();
+const char *GetIniFilePath();
 int PrefReadInt(int def, const char *name, ...);
 bool PrefReadBool(bool def, const char *name, ...);
 const char *PrefReadStr(const char *def, const char *name, ...);

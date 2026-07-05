@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <string>
 #include <vector>
 #include <thread>
@@ -74,7 +75,7 @@ extern int vis_pause;
 
 static const char * const toplistnames[][2] = {
   {"Everywhere", "spotify:toplist:track:everywhere"},
-  {"For Me",     "spotify:toplist:track:forme"},
+  {"Discover Weekly", "spotify:toplist:track:discoverweekly"},
   {NULL, NULL},
   {"in Belgium", "spotify:toplist:track:BE"},
   {"in Denmark", "spotify:toplist:track:DK"},
@@ -90,6 +91,69 @@ static const char * const toplistnames[][2] = {
   {"in the United Kingdom", "spotify:toplist:track:GB"},
   {"in the United States", "spotify:toplist:track:US"},
 };
+
+static const char kDiscoverWeeklyPseudoUri[] = "spotify:toplist:track:discoverweekly";
+static const char kDiscoverWeeklyPref[] = "discover_weekly_uri";
+
+static std::string TrimString(const std::string &s) {
+  size_t start = 0;
+  while (start < s.size() && isspace((unsigned char)s[start]))
+    start++;
+  size_t end = s.size();
+  while (end > start && isspace((unsigned char)s[end - 1]))
+    end--;
+  return s.substr(start, end - start);
+}
+
+static bool IsSpotifyIdChar(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
+static std::string NormalizeSpotifyPlaylistUri(const std::string &input) {
+  std::string value = TrimString(input);
+  const char spotify_prefix[] = "spotify:playlist:";
+  if (value.rfind(spotify_prefix, 0) == 0) {
+    size_t id_start = strlen(spotify_prefix);
+    size_t id_end = id_start;
+    while (id_end < value.size() && IsSpotifyIdChar(value[id_end]))
+      id_end++;
+    if (id_end > id_start)
+      return value.substr(0, id_end);
+  }
+
+  const char path_marker[] = "/playlist/";
+  size_t pos = value.find(path_marker);
+  if (pos != std::string::npos) {
+    size_t id_start = pos + strlen(path_marker);
+    size_t id_end = id_start;
+    while (id_end < value.size() && IsSpotifyIdChar(value[id_end]))
+      id_end++;
+    if (id_end > id_start)
+      return std::string(spotify_prefix) + value.substr(id_start, id_end - id_start);
+  }
+
+  bool id_only = !value.empty();
+  for (char c : value) {
+    if (!IsSpotifyIdChar(c)) {
+      id_only = false;
+      break;
+    }
+  }
+  if (id_only && value.size() >= 10)
+    return std::string(spotify_prefix) + value;
+  return "";
+}
+
+static std::string SpotifyPlaylistIdFromUri(const std::string &uri) {
+  const char spotify_prefix[] = "spotify:playlist:";
+  if (uri.rfind(spotify_prefix, 0) != 0)
+    return "";
+  size_t id_start = strlen(spotify_prefix);
+  size_t id_end = id_start;
+  while (id_end < uri.size() && IsSpotifyIdChar(uri[id_end]))
+    id_end++;
+  return id_end > id_start ? uri.substr(id_start, id_end - id_start) : "";
+}
 
 int MyWavPush(void *context, int flags,
               const TspSampleType *datai, int sizei,
@@ -1327,7 +1391,54 @@ bool MainWindow::HandleAppCommandHotKeys(int cmd, int keys) {
   }
 }
 
+static std::string ResolveDiscoverWeeklyUri(PlatformWindow *parent) {
+  std::string saved = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
+  if (!saved.empty()) {
+    PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
+    std::cout << "[DEBUG] Discover Weekly: using saved playlist " << saved
+              << " from " << GetIniFilePath() << std::endl;
+    return saved;
+  }
+
+  std::string message =
+    "Spotify no longer exposes Discover Weekly through the public API.\n\n"
+    "Open Discover Weekly in Spotify, choose Share, copy the full playlist link, "
+    "and paste it here once. Spotiamp accepts open.spotify.com playlist links, "
+    "spotify:playlist URIs, or raw playlist IDs.\n\n"
+    "It will be saved to:\n";
+  message += GetIniFilePath();
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    std::string input = ShowTextInputDialog(parent, "Discover Weekly", message.c_str(), "");
+    std::string uri = NormalizeSpotifyPlaylistUri(input);
+    if (!uri.empty()) {
+      PrefWriteStr(uri.c_str(), kDiscoverWeeklyPref);
+      std::cout << "[DEBUG] Discover Weekly: saved playlist " << uri
+                << " to " << GetIniFilePath() << std::endl;
+      return uri;
+    }
+    if (TrimString(input).empty()) {
+      std::cout << "[DEBUG] Discover Weekly: setup cancelled" << std::endl;
+      return "";
+    }
+    std::cout << "[DEBUG] Discover Weekly: invalid playlist link: " << input << std::endl;
+  }
+  return "";
+}
+
 void MainWindow::OpenUri(const char *query, int track_to_play) {
+  if (!query || !query[0])
+    return;
+  if (strcmp(query, kDiscoverWeeklyPseudoUri) == 0) {
+    static std::string discover_weekly_uri;
+    discover_weekly_uri = ResolveDiscoverWeeklyUri(this);
+    if (discover_weekly_uri.empty())
+      return;
+    std::cout << "[DEBUG] Discover Weekly: playing Spotify context directly" << std::endl;
+    itemlist_in_sync_with_player_ = true;
+    TspPlayerPlayContext(tsp_, discover_weekly_uri.c_str(), NULL, -1);
+    query = discover_weekly_uri.c_str();
+    return;
+  }
   if (memcmp(query, "spotify:", 8) != 0 && query[0] != '<')
     query = TspGetSearchUri(tsp_, query);
   if (track_to_play == -2) {
@@ -1402,9 +1513,17 @@ void MainWindow::ShowEjectMenu() {
   for(int i = 0; i < arraysize(toplistnames); i++) {
     if (toplistnames[i][0]==0)
       menu.AddSeparator();
-    else
-      menu.AddRadioItem(CMD_TOPLIST + i, toplistnames[i][0], 
-          toplistnames[i][1] && toplistnames[i][1] == cur_uri);
+    else {
+      bool active = toplistnames[i][1] && strcmp(toplistnames[i][1], cur_uri.c_str()) == 0;
+      if (toplistnames[i][1] && strcmp(toplistnames[i][1], kDiscoverWeeklyPseudoUri) == 0) {
+        std::string discover_uri = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
+        std::string discover_id = SpotifyPlaylistIdFromUri(discover_uri);
+        active = active || (!discover_uri.empty() && discover_uri == cur_uri) ||
+                 (!discover_id.empty() &&
+                  cur_uri == std::string(kDiscoverWeeklyPseudoUri) + ":" + discover_id);
+      }
+      menu.AddRadioItem(CMD_TOPLIST + i, toplistnames[i][0], active);
+    }
   }
   menu.EndSubMenu("Top Lists");
   menu.AddSeparator();
@@ -2029,7 +2148,16 @@ void PlaylistWindow::Perform(int cmd) {
     OpenItem(selected_item_);
     break;
   case CMD_GOTO_ALBUM:
-    if (item) main_window_->OpenUri(TspItemGetAlbumUri(item, tsp), -2);
+    if (item) {
+      std::string album_uri = TspItemGetAlbumUri(item, tsp);
+      if (!album_uri.empty()) {
+        std::cout << "[DEBUG] Go to Album: loading " << album_uri << std::endl;
+        main_window_->OpenUri(album_uri.c_str(), -2);
+      } else {
+        std::cout << "[DEBUG] Go to Album: selected item has no album uri: "
+                  << TspItemGetUri(item, tsp) << std::endl;
+      }
+    }
     break;
   case CMD_COPY_TRACK:
     if (item) PlatformWriteClipboard(TspItemGetUri(item, tsp));
@@ -2787,6 +2915,11 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
         playlist_window.FixupScroll();
         playlist_window.Repaint();
         w->itemlist_in_sync_with_player_ = false;
+      } else if (source == w->player_list() &&
+                 strcmp(TspItemListGetUri(w->item_list()), TspItemListGetUri(w->player_list())) == 0) {
+        TspItemListCopyFrom(w->item_list(), w->player_list());
+        playlist_window.FixupScroll();
+        playlist_window.Repaint();
       }
     } else if (event == kTspCallbackEvent_ConnectError) {
       w->connect_error_ = true;

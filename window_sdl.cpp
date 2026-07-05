@@ -374,6 +374,7 @@ void PlatformWindow::BringWindowToTop() {
 #if defined(_MSC_VER) && defined(OS_WIN)
 extern "C" int _stdcall WinMain(int a, int b, int c, int d) {
   SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+  PrefInit();
   InitSpotamp(__argc, __argv);
 #else
 #include <mutex>
@@ -405,6 +406,7 @@ int main(int argc, char *argv[]) {
   // bilinear interpolation on the 1x surface, making the pixel art blurry.
   SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "1");
   SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+  PrefInit();
   InitSpotamp(argc, argv);
 #endif
   
