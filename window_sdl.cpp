@@ -38,6 +38,9 @@ public:
 static bool g_quit;
 static Point g_drag_start;
 static Point g_drag_start_global;
+static Rect g_drag_start_rects[16];
+static int g_drag_start_width;
+static int g_drag_start_height;
 static PlatformWindow *g_captured_window = NULL;
 static bool HandleActiveMenuEvent(SDL_Event *event);
 
@@ -54,10 +57,31 @@ void PlatformWindow::UpdateActiveWindowDrag() {
   SDL_GetGlobalMouseState(&gx, &gy);
   int dx = gx - g_drag_start_global.x;
   int dy = gy - g_drag_start_global.y;
-  if (dx || dy) {
-    w->HandleMouseDragOrSize(dx, dy, true);
-    g_drag_start_global.x = gx;
-    g_drag_start_global.y = gy;
+  if (!dx && !dy)
+    return;
+
+  if (g_drag_sizing) {
+    int scale = w->double_size() ? 2 : 1;
+    int new_w = g_drag_start_width + dx / scale;
+    int new_h = g_drag_start_height + dy / scale;
+    if (w->SizeChanging(&new_w, &new_h))
+      w->Resize(new_w, new_h);
+  } else {
+    int snapped_dx = dx;
+    int snapped_dy = dy;
+    for (int i = 0; i < g_num_drag_windows; ++i)
+      g_drag_windows[i]->screen_rect_ = g_drag_start_rects[i];
+    SnapToScreenEdges(g_drag_windows, g_num_drag_windows, &snapped_dx, &snapped_dy);
+    for (int i = 0; i < g_num_drag_windows; ++i) {
+      PlatformWindow *drag_window = g_drag_windows[i];
+      drag_window->screen_rect_ = g_drag_start_rects[i];
+      drag_window->screen_rect_.left += snapped_dx;
+      drag_window->screen_rect_.right += snapped_dx;
+      drag_window->screen_rect_.top += snapped_dy;
+      drag_window->screen_rect_.bottom += snapped_dy;
+      drag_window->need_move_ = true;
+    }
+    PlatformWindow::MoveAllWindows();
   }
 }
 
@@ -75,6 +99,13 @@ void PlatformWindow::Create(PlatformWindow *owner_window) {
                              width_, height_, SDL_WINDOW_BORDERLESS | (visible_ ? 0 : SDL_WINDOW_HIDDEN));
   window_id_ = SDL_GetWindowID(window_);
   surface_ = SDL_GetWindowSurface(window_);
+  int x = 0, y = 0, w = 0, h = 0;
+  SDL_GetWindowPosition(window_, &x, &y);
+  SDL_GetWindowSize(window_, &w, &h);
+  screen_rect_.left = x;
+  screen_rect_.top = y;
+  screen_rect_.right = x + w;
+  screen_rect_.bottom = y + h;
 }
 
 void PlatformWindow::Blit(int dx, int dy, int w, int h, Bitmap *src, int sx, int sy) {
@@ -181,6 +212,12 @@ void PlatformWindow::Minimize() {
 
 void PlatformWindow::InitDraggingOrSizing() {
   SDL_GetMouseState(&g_drag_start.x, &g_drag_start.y);
+  SDL_GetGlobalMouseState(&g_drag_start_global.x, &g_drag_start_global.y);
+  for (int i = 0; i < g_num_drag_windows; ++i)
+    g_drag_start_rects[i] = *g_drag_windows[i]->screen_rect();
+  PlatformWindow *w = g_num_drag_windows > 0 ? g_drag_windows[0] : NULL;
+  g_drag_start_width = w ? w->width() : 0;
+  g_drag_start_height = w ? w->height() : 0;
 }
 
 void PlatformWindow::PlatformPaint() {
@@ -256,7 +293,6 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
           w->LeftButtonDown(x, y);
           if (w->dragable_) {
             w->InitWindowDragging();
-            SDL_GetGlobalMouseState(&g_drag_start_global.x, &g_drag_start_global.y);
           }
         }
       } else if (event->button.button == SDL_BUTTON_RIGHT) {
@@ -286,6 +322,7 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
       if (event->button.button == SDL_BUTTON_LEFT) {
         g_captured_window = NULL;
         SDL_CaptureMouse(SDL_FALSE);
+        PlatformWindow::SaveDraggedWindowPositions();
         g_num_drag_windows = 0;
         w->LeftButtonUp(x, y);
       } else if (event->button.button == SDL_BUTTON_RIGHT) {
@@ -314,16 +351,44 @@ void PlatformWindow::MoveAllWindows() {
   for(PlatformWindow *w = g_platform_windows; w; w = w->next()) {
     if (w->need_move_) {
       const Rect *r = w->screen_rect();
-      SDL_SetWindowPosition(w->window_, r->left, r->top);
-      SDL_SetWindowSize(w->window_, r->right - r->left, r->bottom - r->top);
-      w->surface_ = SDL_GetWindowSurface(w->window_);
-      w->need_repaint_ = true;
+      int cur_x = 0, cur_y = 0, cur_w = 0, cur_h = 0;
+      SDL_GetWindowPosition(w->window_, &cur_x, &cur_y);
+      SDL_GetWindowSize(w->window_, &cur_w, &cur_h);
+      int next_w = r->right - r->left;
+      int next_h = r->bottom - r->top;
+      if (cur_x != r->left || cur_y != r->top)
+        SDL_SetWindowPosition(w->window_, r->left, r->top);
+      if (cur_w != next_w || cur_h != next_h) {
+        SDL_SetWindowSize(w->window_, next_w, next_h);
+        w->surface_ = SDL_GetWindowSurface(w->window_);
+        w->need_repaint_ = true;
+      }
       w->need_move_ = false;
     }
   }
 }
 
 void PlatformWindow::FindMonitors() {
+  g_num_monitor_rects = 0;
+  int displays = SDL_GetNumVideoDisplays();
+  int max_monitors = (int)(sizeof(g_monitor_rects) / sizeof(g_monitor_rects[0]));
+  for (int i = 0; i < displays && g_num_monitor_rects < max_monitors; ++i) {
+    SDL_Rect bounds;
+    if (SDL_GetDisplayBounds(i, &bounds) == 0) {
+      Rect &r = g_monitor_rects[g_num_monitor_rects++];
+      r.left = bounds.x;
+      r.top = bounds.y;
+      r.right = bounds.x + bounds.w;
+      r.bottom = bounds.y + bounds.h;
+    }
+  }
+}
+
+void PlatformWindow::SaveDraggedWindowPositions() {
+  for (int i = 0; i < g_num_drag_windows; ++i) {
+    if (g_drag_windows[i])
+      g_drag_windows[i]->SavePosition();
+  }
 
 }
 
@@ -362,6 +427,12 @@ unsigned int PlatformWindow::GetBitmapPixel(Bitmap *src, int x, int y) {
 }
 
 void PlatformWindow::Move(int l, int t) {
+  int w = screen_rect_.right - screen_rect_.left;
+  int h = screen_rect_.bottom - screen_rect_.top;
+  screen_rect_.left = l;
+  screen_rect_.top = t;
+  screen_rect_.right = l + w;
+  screen_rect_.bottom = t + h;
   if (window_)
     SDL_SetWindowPosition(window_, l, t);
 }

@@ -173,6 +173,8 @@ struct SkinInfo {
   const char *filename;
 };
 
+static const char kBaseSkinFile[] = "base-2.91.wsz";
+
 static SkinInfo skininfo[100];
 
 static void Skin_Index() {
@@ -187,6 +189,8 @@ static void Skin_Index() {
   sprintf(file, "%sSkins", exepath);
   FileEnumerator enumerator(file);
   while (num_skins < 100 && enumerator.Next()) {
+    if (!enumerator.is_directory() && strcmp(enumerator.filename(), kBaseSkinFile) == 0)
+      continue;
     skininfo[num_skins].filename = strdup(enumerator.filename());
     // Strip the extension component if this entry is a filename.
     if (!enumerator.is_directory()) {
@@ -312,11 +316,12 @@ static uint32 ParseColor(const char *s) {
 
 static void LoadSkin(const char *skinfile) {
   char file[MAX_PATH+100];
-  if (skinfile && skinfile[0]) {
+  const char *effective_skin = (skinfile && skinfile[0]) ? skinfile : kBaseSkinFile;
+  if (effective_skin && effective_skin[0]) {
 #if defined(WITH_SDL)
-    snprintf(file, sizeof(file), "%sSkins/%s", exepath, skinfile);
+    snprintf(file, sizeof(file), "%sSkins/%s", exepath, effective_skin);
 #else
-    sprintf(file, "%sSkins\\%s", exepath, skinfile);
+    sprintf(file, "%sSkins\\%s", exepath, effective_skin);
 #endif
     PlatformSetSkin(file);
   } else {
@@ -455,11 +460,10 @@ bool MainWindow::Load() {
   InitThreading();
   RegisterForGlobalHotkeys();
 
-  LoadPosition(0, 0);
-
   bool compact = PrefReadBool(false, "compact");
   compact_ = !compact;
   SetCompact(compact);
+  LoadPosition(40, 40);
   equalizer_ = PrefReadBool(false, "equalizer");
   g_easy_move = PrefReadBool(true, "easy_move");
   time_mode_ = PrefReadBool(false, "time_mode");
@@ -475,6 +479,10 @@ bool MainWindow::Load() {
   WavSetDeviceId(PrefReadInt(-1, "wave_device"));
   TspSetTargetBitrate(tsp_, bitrate_);
   curr_skin_ = PrefReadStr("", "skin");
+  if (curr_skin_ == kBaseSkinFile) {
+    curr_skin_.clear();
+    PrefWriteStr("", "skin");
+  }
   LoadSkin(curr_skin_.c_str());
 
   EnableGlobalHotkeys(PrefReadBool(false, "global_hotkeys"));
@@ -1566,7 +1574,7 @@ void MainWindow::ShowOptionsMenu() {
 
   menu.BeginSubMenu();
   int i = 0;
-  menu.AddRadioItem(CMD_SKIN + 0, "Base Skin", curr_skin_.empty());
+  menu.AddRadioItem(CMD_SKIN + 0, "Winamp Base 2.91", curr_skin_.empty());
   while (const char *s = Skin_Enumerate(i)) {
     bool active = curr_skin_ == Skin_GetFileName(i++);
     menu.AddRadioItem(CMD_SKIN + i, s, active);
@@ -1706,6 +1714,16 @@ PlaylistWindow::PlaylistWindow(MainWindow *main_window) {
   id_ = 1;
   main_window_ = main_window;
   hover_button_ = -1;
+  compact_ = false;
+  left_button_down_ = false;
+  dragging_list_ = false;
+  dragging_list_delta_ = 0;
+  dragging_list_pixel_ = 0;
+  normal_height_ = WND_MAIN_H * 3;
+  selected_item_ = 0;
+  scroll_ = 0;
+  font_size_ = 10;
+  row_height_ = 13;
   Resize(WND_MAIN_W, WND_MAIN_H * 3);
 }
 
@@ -1715,9 +1733,11 @@ PlaylistWindow::~PlaylistWindow() {
 
 void PlaylistWindow::Load() {
   LoadPosition(main_window.screen_rect()->left, main_window.screen_rect()->bottom);
-  SetCompact(PrefReadBool(false, "pl.compact"));
   font_size_ = PrefReadInt(10, "pl.font_size");
   row_height_ = 13;
+  normal_height_ = PrefReadInt(WND_MAIN_H * 3, "pl.height");
+  Resize(PrefReadInt(WND_MAIN_W, "pl.width"), normal_height_);
+  SetCompact(PrefReadBool(false, "pl.compact"));
 }
 
 static ButtonRect playlist_window_buttons[] = {
@@ -1818,6 +1838,11 @@ void PlaylistWindow::LeftButtonUp(int x, int y) {
   if (dragging_list_) {
     dragging_list_ = false;
     Repaint();
+  }
+  PrefWriteInt(width(), "pl.width");
+  if (!compact_) {
+    normal_height_ = height();
+    PrefWriteInt(normal_height_, "pl.height");
   }
   left_button_down_ = false;
   MouseMove(x, y);
@@ -2066,6 +2091,8 @@ void PlaylistWindow::SetCompact(bool v) {
     if (v) normal_height_ = height();
     Resize(width(), v ? 14 : normal_height_);
     PrefWriteInt(compact_, "pl.compact");
+    PrefWriteInt(width(), "pl.width");
+    PrefWriteInt(normal_height_, "pl.height");
   }
 }
 

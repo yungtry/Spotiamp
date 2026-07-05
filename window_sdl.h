@@ -90,6 +90,7 @@ private:
   static void InitDraggingOrSizing();
   static void MoveAllWindows();
   static void FindMonitors();
+  static void SaveDraggedWindowPositions();
   
   bool need_repaint_;
   SDL_Window *window_;

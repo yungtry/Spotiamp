@@ -19,31 +19,35 @@ set(SPOTIAMP_CLIENT_ID     "$ENV{SPOTIFY_CLIENT_ID}")
 set(SPOTIAMP_CLIENT_SECRET "$ENV{SPOTIFY_CLIENT_SECRET}")
 
 if("${SPOTIAMP_CLIENT_ID}" STREQUAL "" OR "${SPOTIAMP_CLIENT_SECRET}" STREQUAL "")
-  message(FATAL_ERROR
-    "\nSPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set before running cmake.\n"
-    "Register an app at https://developer.spotify.com/dashboard\n"
-    "Set redirect URI to http://127.0.0.1:3000/callback, then:\n"
-    "  export SPOTIFY_CLIENT_ID=your_client_id\n"
-    "  export SPOTIFY_CLIENT_SECRET=your_client_secret\n"
-    "  cmake -B build && cmake --build build\n"
+  if(EXISTS "${CREDENTIALS_H}")
+    message(STATUS "Using existing generated Spotify credentials header")
+  else()
+    message(FATAL_ERROR
+      "\nSPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set before running cmake.\n"
+      "Register an app at https://developer.spotify.com/dashboard\n"
+      "Set redirect URI to http://127.0.0.1:3000/callback, then:\n"
+      "  export SPOTIFY_CLIENT_ID=your_client_id\n"
+      "  export SPOTIFY_CLIENT_SECRET=your_client_secret\n"
+      "  cmake -B build && cmake --build build\n"
+    )
+  endif()
+else()
+  # Run the Python script now, at configure time, passing credentials as args
+  # so they never need to be in the environment at build time.
+  execute_process(
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/gen_credentials.py"
+            "${CREDENTIALS_DIR}"
+            "${SPOTIAMP_CLIENT_ID}"
+            "${SPOTIAMP_CLIENT_SECRET}"
+    RESULT_VARIABLE CRED_RESULT
+    OUTPUT_VARIABLE CRED_OUTPUT
+    ERROR_VARIABLE  CRED_ERROR
   )
+  if(NOT CRED_RESULT EQUAL 0)
+    message(FATAL_ERROR "gen_credentials.py failed:\n${CRED_ERROR}")
+  endif()
+  message(STATUS "${CRED_OUTPUT}")
 endif()
-
-# Run the Python script now, at configure time, passing credentials as args
-# so they never need to be in the environment at build time.
-execute_process(
-  COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/gen_credentials.py"
-          "${CREDENTIALS_DIR}"
-          "${SPOTIAMP_CLIENT_ID}"
-          "${SPOTIAMP_CLIENT_SECRET}"
-  RESULT_VARIABLE CRED_RESULT
-  OUTPUT_VARIABLE CRED_OUTPUT
-  ERROR_VARIABLE  CRED_ERROR
-)
-if(NOT CRED_RESULT EQUAL 0)
-  message(FATAL_ERROR "gen_credentials.py failed:\n${CRED_ERROR}")
-endif()
-message(STATUS "${CRED_OUTPUT}")
 
 include_directories("${CREDENTIALS_DIR}")
 
@@ -131,6 +135,12 @@ else()
 endif()
 
 add_executable(spotiamp ${SPOTIAMP_SRCS})
+
+add_custom_command(TARGET spotiamp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/Skins"
+            "$<TARGET_FILE_DIR:spotiamp>/Skins"
+)
 
 # Linking
 if(MSVC)
