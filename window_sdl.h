@@ -4,6 +4,8 @@
 #include "stdafx.h"
 #include "SDL.h"
 #include "window.h"
+#include <dirent.h>
+#include <functional>
 
 typedef SDL_Window *WindowHandle;
 
@@ -13,12 +15,15 @@ public:
   PlatformWindow();
   virtual ~PlatformWindow();
 
-  virtual void LeftButtonDown(int x, int y) = 0;
-  virtual void LeftButtonDouble(int x, int y) = 0;
-  virtual void LeftButtonUp(int x, int y) = 0;
-  virtual void MouseMove(int x, int y) = 0;
+  virtual void LeftButtonDown(int x, int y) {}
+  virtual void LeftButtonDouble(int x, int y) {}
+  virtual void LeftButtonUp(int x, int y) {}
+  virtual void RightButtonDown(int x, int y) {}
+  virtual void RightButtonUp(int x, int y) {}
+  virtual void MouseMove(int x, int y) {}
+  virtual void MouseWheel(int x, int y, int dx, int dy) {}
   virtual void Paint() = 0;
-  virtual void KeyDown(int key, int shift) = 0;
+  virtual void KeyDown(int key, int shift) {}
   virtual bool SizeChanging(int *w, int *h) { return false; }
   virtual void MainLoop() {}
   virtual void ScrollText() {}
@@ -26,6 +31,7 @@ public:
   virtual void Destroy() {}
 
   void RegisterForGlobalHotkeys() {}
+  void WindowDragableChanged() {}
   void MakeActive();
 
   void Create(PlatformWindow *owner_window);
@@ -37,10 +43,10 @@ public:
   void StretchBlit(int dx, int dy, int w, int h, Bitmap *src, int sx, int sy, int sw, int sh);
 
   // Fill a rectangle with a color
-  void Fill(int x, int y, int w, int h, unsigned int color) {}
+  void Fill(int x, int y, int w, int h, unsigned int color);
 
   // Draw a text inside a rectangle
-  void DrawText(int x, int y, int w, int h, const char *text, int flags, unsigned int color) {}
+  void DrawText(int x, int y, int w, int h, const char *text, int flags, unsigned int color);
   
   // Draw a line
   void Line(int x, int y, int x2, int y2, unsigned int color);
@@ -71,6 +77,7 @@ public:
   void PlatformPaint();
   static void HandleEvent(SDL_Event *event);
   static PlatformWindow *FromID(Uint32 window_id);
+  static void UpdateActiveWindowDrag();
 
   WindowHandle SetVisualizer(int x, int y, int w, int h);
 
@@ -101,6 +108,10 @@ public:
   char *filename() const;
 
 private:
+  DIR *dir_;
+  char directory_[MAX_PATH];
+  char filename_[MAX_PATH];
+  bool current_is_dir_;
 };
 
 class MenuBuilder {
@@ -125,6 +136,8 @@ public:
 
   int Popup(PlatformWindow *window);
   int PopupAt(PlatformWindow *window, int x, int y);
+  void PopupAsync(PlatformWindow *window, std::function<void(int)> callback);
+  void PopupAtAsync(PlatformWindow *window, int x, int y, std::function<void(int)> callback);
 private:
 };
 

@@ -6,6 +6,10 @@
 
 typedef struct Shoutcast Shoutcast;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Create an instance of the shoutcast streamer
 Shoutcast *ShoutcastCreate(Tsp *tsp);
 
@@ -27,5 +31,9 @@ void ShoutcastSetNowPlaying(Shoutcast *shoutcast, TspItem *item);
 // Return the number of connected clients
 int ShoutcastNumClients(Shoutcast *shoutcast);
 
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  // TINY_SPOTIFY_SHOUTCAST_H_

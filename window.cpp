@@ -2,7 +2,11 @@
 #include "stdafx.h"
 #include "window.h"
 #include <stdio.h>
+#include <map>
+#include <string>
+#ifdef _MSC_VER
 #include <Shlobj.h>
+#endif
 
 Rect g_monitor_rects[16];
 int g_num_monitor_rects;
@@ -426,12 +430,119 @@ void PrefWriteStr(const char *v, const char *name, ...) {
 
 #else  // defined(_MSC_VER)
 
-void PrefInit() {}
-int PrefReadInt(int def, const char *name, ...) { return def; }
-bool PrefReadBool(bool def, const char *name, ...) { return def; }
-const char *PrefReadStr(const char *def, const char *name, ...) { return def; }
-void PrefWriteInt(int v, const char *name, ...) {}
-void PrefWriteStr(const char *v, const char *name, ...) {}
+static char inifile[MAX_PATH + 100];
+extern char exepath[MAX_PATH];
+
+static std::string FormatPrefName(const char *name, va_list va) {
+  char buf[256];
+  vsnprintf(buf, sizeof(buf), name, va);
+  return buf;
+}
+
+static std::map<std::string, std::string> ReadPrefs() {
+  std::map<std::string, std::string> prefs;
+  FILE *f = fopen(inifile, "rb");
+  if (!f)
+    return prefs;
+
+  char line[4096];
+  while (fgets(line, sizeof(line), f)) {
+    char *s = line;
+    while (*s == ' ' || *s == '\t')
+      s++;
+    if (*s == 0 || *s == '\r' || *s == '\n' || *s == '[' || *s == '#')
+      continue;
+
+    char *eq = strchr(s, '=');
+    if (!eq)
+      continue;
+    *eq++ = 0;
+
+    char *end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t'))
+      *--end = 0;
+    end = eq + strlen(eq);
+    while (end > eq && (end[-1] == '\r' || end[-1] == '\n'))
+      *--end = 0;
+    prefs[s] = eq;
+  }
+  fclose(f);
+  return prefs;
+}
+
+static void WritePrefs(const std::map<std::string, std::string> &prefs) {
+  FILE *f = fopen(inifile, "wb");
+  if (!f)
+    return;
+  fputs("[Main]\n", f);
+  for (const auto &it : prefs) {
+    fprintf(f, "%s=%s\n", it.first.c_str(), it.second.c_str());
+  }
+  fclose(f);
+}
+
+void PrefInit() {
+  snprintf(inifile, sizeof(inifile), "%sSpotiamp.ini", exepath);
+  FILE *f = fopen(inifile, "ab");
+  if (f)
+    fclose(f);
+}
+
+int PrefReadInt(int def, const char *name, ...) {
+  va_list va;
+  va_start(va, name);
+  std::string key = FormatPrefName(name, va);
+  va_end(va);
+  auto prefs = ReadPrefs();
+  auto it = prefs.find(key);
+  return it == prefs.end() ? def : atoi(it->second.c_str());
+}
+
+bool PrefReadBool(bool def, const char *name, ...) {
+  va_list va;
+  va_start(va, name);
+  std::string key = FormatPrefName(name, va);
+  va_end(va);
+  auto prefs = ReadPrefs();
+  auto it = prefs.find(key);
+  return it == prefs.end() ? def : atoi(it->second.c_str()) != 0;
+}
+
+const char *PrefReadStr(const char *def, const char *name, ...) {
+  static char databuf[4096];
+  va_list va;
+  va_start(va, name);
+  std::string key = FormatPrefName(name, va);
+  va_end(va);
+  auto prefs = ReadPrefs();
+  auto it = prefs.find(key);
+  if (it == prefs.end())
+    return def;
+  strncpy(databuf, it->second.c_str(), sizeof(databuf) - 1);
+  databuf[sizeof(databuf) - 1] = 0;
+  return databuf;
+}
+
+void PrefWriteInt(int v, const char *name, ...) {
+  va_list va;
+  va_start(va, name);
+  std::string key = FormatPrefName(name, va);
+  va_end(va);
+  auto prefs = ReadPrefs();
+  char value[32];
+  snprintf(value, sizeof(value), "%d", v);
+  prefs[key] = value;
+  WritePrefs(prefs);
+}
+
+void PrefWriteStr(const char *v, const char *name, ...) {
+  va_list va;
+  va_start(va, name);
+  std::string key = FormatPrefName(name, va);
+  va_end(va);
+  auto prefs = ReadPrefs();
+  prefs[key] = v ? v : "";
+  WritePrefs(prefs);
+}
 
 #endif  // defined(_MSC_VER)
-

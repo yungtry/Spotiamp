@@ -134,6 +134,7 @@ public:
 	int8 dragging_seek_delta_;
 	int seek_pixel_;
 	int seek_target_;
+	int seek_target_ms_;
 
 	int position_indicator_;
 	int text_scroll_;

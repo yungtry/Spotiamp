@@ -8,6 +8,10 @@ struct Size { int w, h; };
 struct Point { int x, y; };
 struct Bitmap { int x; };
 
+#include <functional>
+void RunOnMainThread(std::function<void()> task);
+void ProcessMainThreadTasks();
+
 // Base class using CRTP.
 template<typename T>
 class PlatformWindowBase {
@@ -72,6 +76,9 @@ class PlatformWindowBase {
 #else
 #include "window_win32.h"
 #endif
+
+template <>
+void PlatformWindowBase<PlatformWindow>::SizeChanged();
 
 struct Bitmap;
 class PlatformWindow;

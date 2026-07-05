@@ -3,3 +3,13 @@
 out/
 build/
 releases/
+refresh_token.txt
+librespot_err.log
+.DS_Store
+
+# Generated at build time — never commit
+generated/credentials.h
+# Appkey — never commit
+appkey.h
+# Local env file
+.env

@@ -9,7 +9,9 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#if defined(OS_WIN)
 #include <wininet.h>
+#endif
 
 #include "tiny_spotify/tiny_spotify.h"
 
@@ -63,6 +65,9 @@ static int tsp_iteration;
 static Shoutcast *g_sc;
 
 void UpdateEqualizer(const TspSampleType *ptr, int count, int buff);
+#if defined(WITH_SDL)
+void PaintSdlVisualizer(PlatformWindow *w);
+#endif
 
 extern int vis_pause;
 
@@ -93,8 +98,6 @@ int MyWavPush(void *context, int flags,
     r = ShoutcastWavPush(g_sc, flags, datai, sizei, sample_format, samples_buffered);
   } else {
     r = WavPush(context, flags, datai, sizei, sample_format, samples_buffered);
-    if (r > 0)
-      UpdateEqualizer(datai, r, *samples_buffered);
   }
   vis_pause = (flags & kTspAudioFlag_Pause);
   return r;
@@ -108,9 +111,12 @@ struct SkinInfo {
 static SkinInfo skininfo[100];
 
 static void Skin_Index() {
-  static bool skins_indexed;
-  if (skins_indexed) return;
-  skins_indexed = true;
+  for (int i = 0; i < 100; ++i) {
+    free((void*)skininfo[i].name);
+    free((void*)skininfo[i].filename);
+    skininfo[i].name = NULL;
+    skininfo[i].filename = NULL;
+  }
   char file[MAX_PATH + 100];
   int num_skins = 0;
   sprintf(file, "%sSkins", exepath);
@@ -120,7 +126,7 @@ static void Skin_Index() {
     // Strip the extension component if this entry is a filename.
     if (!enumerator.is_directory()) {
       char *t = enumerator.filename() + strlen(enumerator.filename());
-      while (t > enumerator.filename() && t[-1] != '\\') {
+      while (t > enumerator.filename() && t[-1] != '\\' && t[-1] != '/') {
         if (t[-1] == '.') { t[-1] = 0; break; }
         t--;
       }
@@ -205,6 +211,8 @@ MainWindow::MainWindow() {
   tsp_ = NULL;
   bitrate_ = kTspBitrate_Normal;
   delayed_command_ = 0;
+  seek_target_ = -1;
+  seek_target_ms_ = -1;
 }
 
 MainWindow::~MainWindow() {
@@ -233,14 +241,18 @@ char *strbegins(const char *big, const char *little) {
 static uint32 ParseColor(const char *s) {
   if (*s == '#') s++;
   uint32 rv = strtoul(s, NULL, 16);
-
-  return (rv & 0xff0000)>>16 | (rv & 0xff00) | (rv & 0xff) << 16;
+  // pledit.txt uses standard #RRGGBB hex — no byte swap needed.
+  return rv & 0xffffff;
 }
 
 static void LoadSkin(const char *skinfile) {
   char file[MAX_PATH+100];
   if (skinfile && skinfile[0]) {
+#if defined(WITH_SDL)
+    snprintf(file, sizeof(file), "%sSkins/%s", exepath, skinfile);
+#else
     sprintf(file, "%sSkins\\%s", exepath, skinfile);
+#endif
     PlatformSetSkin(file);
   } else {
     PlatformSetSkin(NULL);
@@ -314,8 +326,10 @@ void TspDprintf(const char *s, ...) {
 // This is called on the disk thread, to notify the main thread that there are pending
 // disk events.
 static void FileIOThreadNotify(void *user_data) {
+#ifndef WITH_SDL
   MainWindow *mw = (MainWindow *)user_data;
   mw->NotifyIOEvents();
+#endif
 }
 
 void MainWindow::PumpIOEvents() {
@@ -335,11 +349,18 @@ bool MainWindow::Load() {
   limits.track_player_size = 200;
   limits.compressed_buffer_size = 1024 * 2048;
 
+  // Decode the obfuscated appkey into a stack buffer at runtime.
+  unsigned char appkey_decoded[g_appkey_size];
+  DecodeAppkey(appkey_decoded, g_appkey_size);
+
   tsp_ = TspCreate(machine_id,
                    MyCallback, this,
-                   g_appkey, sizeof(g_appkey),
+                   appkey_decoded, g_appkey_size,
                    "Spotiamp",
                    kTspCreate_DownloadRootlist, &limits, NULL);
+
+  // Zero the decoded buffer immediately — don't leave the key on the stack.
+  for (size_t i = 0; i < g_appkey_size; ++i) appkey_decoded[i] = 0;
 
   if (!tsp_) {
     return false;
@@ -433,6 +454,7 @@ void MainWindow::LeftButtonDown(int x, int y) {
     dragging_seek_delta_ = (unsigned)(x - seek_pixel_) <= 29 ? (x - seek_pixel_) : (29 / 2);
     dragging_seek_ = true;
     seek_target_ = -1;
+    seek_target_ms_ = -1;
     MouseMove(x, y);
   } else if (hover_button_ < 0) {
     lbutton_down_ = false;
@@ -459,8 +481,8 @@ void MainWindow::LeftButtonUp(int x, int y) {
 
   if (dragging_seek_) {
     dragging_seek_ = false;
-    if (seek_target_ >= 0)
-      TspPlayerSeek(tsp_, seek_target_ * 1000);
+    if (seek_target_ms_ >= 0)
+      TspPlayerSeek(tsp_, seek_target_ms_);
   }
 
   lbutton_down_ = false;
@@ -515,8 +537,11 @@ void MainWindow::MouseMove(int x, int y) {
       if (p > 218) p = 218;
       int dur = TspPlayerGetDuration(tsp_);
       if (dur > 0) {
-        int t = p * dur / 218;
-        if (t != seek_target_) {
+        int dur_ms = TspPlayerGetDurationMs(tsp_);
+        int t_ms = dur_ms > 0 ? p * dur_ms / 218 : p * dur * 1000 / 218;
+        int t = t_ms / 1000;
+        if (t_ms != seek_target_ms_) {
+          seek_target_ms_ = t_ms;
           seek_target_ = t;
           Repaint();
         }
@@ -701,6 +726,10 @@ void MainWindow::PaintFull() {
   Blit(212, 41, 28, 12,  srcbmp, 29, mono_ ? 0 : 12);
   Blit(239, 41, 29, 12,  srcbmp, 0, stereo_ ? 0 : 12);
 
+#if defined(WITH_SDL)
+  PaintSdlVisualizer(this);
+#endif
+
   // Title bar
   srcbmp = res.titlebar;
   Blit(0, 0, 275, 14,     srcbmp, 27, active() ? 0 : 15);
@@ -738,6 +767,8 @@ void MainWindow::PaintFull() {
   TspItem *item = TspPlayerGetNowPlaying(tsp_);
   int duration = TspPlayerGetDuration(tsp_);
   int position = TspPlayerGetPosition(tsp_);
+  int duration_ms = TspPlayerGetDurationMs(tsp_);
+  int position_ms = TspPlayerGetPositionMs(tsp_);
   TspPlayState state = TspPlayerGetState(tsp_);
 
   if (state != kTspPlayState_Stopped && position_indicator_ != INT_MIN) {
@@ -827,8 +858,8 @@ void MainWindow::PaintFull() {
   // Main seek bar
   // Range = 219
   if (state != kTspPlayState_Stopped) {
-    int seekpos = dragging_seek_ ? seek_target_ : position;
-    int seekpix = 16 + (duration ? (seekpos * 219 + (duration / 2)) / duration : 0);
+    int seekpos_ms = dragging_seek_ ? seek_target_ms_ : position_ms;
+    int seekpix = 16 + (duration_ms ? (seekpos_ms * 219 + (duration_ms / 2)) / duration_ms : 0);
     Blit(seekpix, 72, 29, 10, res.posbar, dragging_seek_ ? 278 : 248, 0);
     seek_pixel_ = seekpix;
   }
@@ -1152,6 +1183,22 @@ void MainWindow::SetEqVisible(bool v) {
 void MainWindow::MainLoop() {
   tsp_iteration++;
   TspDoWork(tsp_);
+  {
+    static std::string auto_advanced_uri;
+    TspPlayState state = TspPlayerGetState(tsp_);
+    int dur = TspPlayerGetDurationMs(tsp_);
+    int pos = TspPlayerGetPositionMs(tsp_);
+    if (state == kTspPlayState_Playing && dur > 0 && pos >= dur - 750) {
+      TspItem *item = TspPlayerGetNowPlaying(tsp_);
+      std::string uri = item ? TspItemGetUri(item, tsp_) : "";
+      if (!uri.empty() && uri != auto_advanced_uri) {
+        auto_advanced_uri = uri;
+        TspPlayerNextTrack(tsp_);
+      }
+    } else if (dur <= 0 || pos < dur - 3000 || state != kTspPlayState_Playing) {
+      auto_advanced_uri.clear();
+    }
+  }
   int indicator;
   if (time_mode_) {
     int dur = TspPlayerGetDurationMs(tsp_);
@@ -1165,6 +1212,16 @@ void MainWindow::MainLoop() {
   }
 
   SetPositionIndicator(indicator);
+#if defined(WITH_SDL)
+  if (!compact_ && TspPlayerGetState(tsp_) != kTspPlayState_Stopped) {
+    static unsigned int last_vis_repaint;
+    unsigned int now = PlatformGetTicks();
+    if (now - last_vis_repaint > 33) {
+      last_vis_repaint = now;
+      RepaintRange(24, 43, 76, 16);
+    }
+  }
+#endif
   TspWaitForNetworkEvents(tsp_, 10);
 
   if (shoutcast_ != (g_sc != NULL)) {
@@ -1434,7 +1491,14 @@ void MainWindow::ShowOptionsMenu() {
   menu.AddSeparator();
   menu.AddItem(CMD_EXIT, "Exit");
 //  CheckMenuRadioItem(menu, CMD_TIME_ELAPSED, CMD_TIME_REMAINS, time_mode_?CMD_TIME_REMAINS:CMD_TIME_ELAPSED, MF_BYCOMMAND);
+#if defined(WITH_SDL)
+  menu.PopupAsync(this, [this](int cmd) {
+    if (cmd)
+      Perform(cmd);
+  });
+#else
   Perform(menu.Popup(this));
+#endif
 }
 
 void MainWindow::ShowVisualizeMenu() {
@@ -1650,7 +1714,7 @@ void PlaylistWindow::MouseMove(int x, int y) {
   SetWindowDragable(over == -1 && (g_easy_move || y < 14));
 
   if (dragging_list_) {
-    int p = y - dragging_list_ - 20;
+    int p = y - dragging_list_delta_ - 20;
     int h = height() - 58 - 18;
     int n = IntMax(0, ItemCount() - VisibleItemCount());
     int s = (n * p + h/2) / h;
@@ -1733,7 +1797,10 @@ void PlaylistWindow::PaintFull() {
   char buffer[1024];
   Tsp *tsp = main_window_->tsp();
   TspItemList *item_list = main_window_->item_list();
-  int playing_item = TspItemListGetNowPlayingIndex(item_list);
+  // Determine the currently playing URI — more reliable than index since
+  // item_list_ and player_list_ may have diverged now_playing_index values.
+  TspItem *now_playing_item = TspPlayerGetNowPlaying(tsp);
+  const char *playing_uri = now_playing_item ? TspItemGetUri(now_playing_item, tsp) : NULL;
   for(int i = 0; i < num_lines; i++) {
     int j = i + scroll_;
     TspItem *item = TspItemListGetItem(item_list, j);
@@ -1741,11 +1808,24 @@ void PlaylistWindow::PaintFull() {
 
     int y = 22 + i * row_height_;
 
+    // Check if this row is the currently playing track (by URI).
+    const char *row_uri = TspItemGetUri(item, tsp);
+    bool is_playing = playing_uri && row_uri && strcmp(playing_uri, row_uri) == 0;
+
     // If line is selected, fill with a blue color
     if (selected_item_ == j)
       Fill(12, y, width() - 12 - 19, row_height_, g_color_bg_selected);
     
-    unsigned int text_color = (j == playing_item) ? g_color_current : g_color_normal;
+    // Color priority: currently playing always gets g_color_current.
+    // Selected-but-not-playing also gets g_color_current so it reads
+    // clearly over the selection background. Everything else is g_color_normal.
+    unsigned int text_color;
+    if (is_playing)
+      text_color = g_color_current;
+    else if (selected_item_ == j)
+      text_color = g_color_current;
+    else
+      text_color = g_color_normal;
     TspItemType item_type = TspItemGetType(item);
     switch(item_type) {
     case kTspItemType_Track: {
@@ -1777,6 +1857,7 @@ void PlaylistWindow::PaintFull() {
   int s = scroll_ < 0 ? 0 : scroll_ > n ? n : scroll_;
   int h = (height() - 58 - 18);
   int p = 19 + (n ? s * h / n : 0);
+  dragging_list_pixel_ = p;
   Blit(width()-15, p, 8, 18, res.pledit, dragging_list_?61:52, 53);
 }
 
@@ -2565,6 +2646,7 @@ void CoverArtWindow::OnClose() {
   main_window.SetCoverartVisible(false);
 }
 
+#if defined(OS_WIN)
 void DownloadFile(const char* url, std::vector<char>& buffer) {
   HINTERNET hInternet = InternetOpenA("FileDownloader", INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
   if (hInternet) {
@@ -2585,6 +2667,23 @@ void DownloadFile(const char* url, std::vector<char>& buffer) {
     std::cout << "Failed to initialize WinINet" << std::endl;
   }
 }
+#else
+void DownloadFile(const char* url, std::vector<char>& buffer) {
+  std::string cmd = std::string("curl -s -L \"") + url + "\"";
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (pipe) {
+    char tempBuffer[1024];
+    size_t bytesRead;
+    while ((bytesRead = fread(tempBuffer, 1, sizeof(tempBuffer), pipe)) > 0) {
+      buffer.insert(buffer.end(), tempBuffer, tempBuffer + bytesRead);
+    }
+    pclose(pipe);
+    std::cout << "File downloaded successfully via curl." << std::endl;
+  } else {
+    std::cout << "Failed to run curl for: " << url << std::endl;
+  }
+}
+#endif
 
 void CoverArtWindow::SetImage(const char* image) {
 	if (image == image_) return;
@@ -2629,54 +2728,56 @@ void CoverArtWindow::GotImagePart(TspImageDownloadResult *part) {
 }
 
 static void MyCallback(void *context, TspCallbackEvent event, void *source, void *param) {
-  MainWindow *w = (MainWindow*)context;
-  if (event == kTspCallbackEvent_Connected) {
-    w->connect_error_ = false;
+  RunOnMainThread([context, event, source, param]() {
+    MainWindow *w = (MainWindow*)context;
+    if (event == kTspCallbackEvent_Connected) {
+      w->connect_error_ = false;
 
-    char token[1024];
-    if (!w->username_.empty() && TspGetCredentialToken(w->tsp_, token, sizeof(token)) == 0) {
-      PrefWriteStr(w->username_.c_str(), "username");
-      PrefWriteStr(token, "password");
-    }
+      char token[1024];
+      if (!w->username_.empty() && TspGetCredentialToken(w->tsp_, token, sizeof(token)) == 0) {
+        PrefWriteStr(w->username_.c_str(), "username");
+        PrefWriteStr(token, "password");
+      }
 
-  } else if (event == kTspCallbackEvent_AutoComplete) {
-    AutoCompleteCopy();
-  } else if (event == kTspCallbackEvent_NowPlayingChanged || event == kTspCallbackEvent_RemoteUpdate) {
-    w->ResetScroll();
-    w->Repaint();
-    w->SaveNowPlaying();
-    playlist_window.ScrollInView();
-    playlist_window.Repaint();
-    
-    TspItem *playing_item = TspPlayerGetNowPlaying(w->tsp_);
-    if (g_sc)
-      ShoutcastSetNowPlaying(g_sc, playing_item);
-
-    coverart_window.SetImage(playing_item ? TspItemGetImageUri(playing_item, w->tsp_) : "");
-  } else if (event == kTspCallbackEvent_PlayControlsChanged) {
-    PrefWriteInt(TspPlayerGetShuffle(w->tsp()), "shuffle");
-    PrefWriteInt(TspPlayerGetRepeat(w->tsp()), "repeat");
-    w->Repaint();
-  } else if (event == kTspCallbackEvent_VolumeChanged) {
-    WavSetVolume(TspPlayerGetVolume(w->tsp()));
-    w->Repaint();
-  } else if (event == kTspCallbackEvent_Pause || event == kTspCallbackEvent_Resume) {
-    w->Repaint();
-  } else if (event == kTspCallbackEvent_ItemListChanged) {
-    if (source == w->item_list()) {
-      playlist_window.FixupScroll();
+    } else if (event == kTspCallbackEvent_AutoComplete) {
+      AutoCompleteCopy();
+    } else if (event == kTspCallbackEvent_NowPlayingChanged || event == kTspCallbackEvent_RemoteUpdate) {
+      w->ResetScroll();
+      w->Repaint();
+      w->SaveNowPlaying();
+      playlist_window.ScrollInView();
       playlist_window.Repaint();
-    } else if (source == w->player_list() && w->itemlist_in_sync_with_player_) {
-      TspItemListCopyFrom(w->item_list(), w->player_list());
-      playlist_window.FixupScroll();
-      playlist_window.Repaint();
-      w->itemlist_in_sync_with_player_ = false;
+      
+      TspItem *playing_item = TspPlayerGetNowPlaying(w->tsp_);
+      if (g_sc)
+        ShoutcastSetNowPlaying(g_sc, playing_item);
+
+      coverart_window.SetImage(playing_item ? TspItemGetImageUri(playing_item, w->tsp_) : "");
+    } else if (event == kTspCallbackEvent_PlayControlsChanged) {
+      PrefWriteInt(TspPlayerGetShuffle(w->tsp()), "shuffle");
+      PrefWriteInt(TspPlayerGetRepeat(w->tsp()), "repeat");
+      w->Repaint();
+    } else if (event == kTspCallbackEvent_VolumeChanged) {
+      WavSetVolume(TspPlayerGetVolume(w->tsp()));
+      w->Repaint();
+    } else if (event == kTspCallbackEvent_Pause || event == kTspCallbackEvent_Resume) {
+      w->Repaint();
+    } else if (event == kTspCallbackEvent_ItemListChanged) {
+      if (source == w->item_list()) {
+        playlist_window.FixupScroll();
+        playlist_window.Repaint();
+      } else if (source == w->player_list() && w->itemlist_in_sync_with_player_) {
+        TspItemListCopyFrom(w->item_list(), w->player_list());
+        playlist_window.FixupScroll();
+        playlist_window.Repaint();
+        w->itemlist_in_sync_with_player_ = false;
+      }
+    } else if (event == kTspCallbackEvent_ConnectError) {
+      w->connect_error_ = true;
+    } else if (event == kTspCallbackEvent_ImageDownload) {
+      coverart_window.GotImagePart((TspImageDownloadResult*)param);
     }
-  } else if (event == kTspCallbackEvent_ConnectError) {
-    w->connect_error_ = true;
-  } else if (event == kTspCallbackEvent_ImageDownload) {
-    coverart_window.GotImagePart((TspImageDownloadResult*)param);
-  }
+  });
 }
 
 PlatformWindow *InitSpotamp(int argc, char **argv) {

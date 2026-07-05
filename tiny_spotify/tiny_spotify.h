@@ -1,6 +1,10 @@
 #ifndef TINY_SPOTIFY_H_
 #define TINY_SPOTIFY_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 
 // MSVC does not have the stdint.h header
@@ -1388,6 +1392,10 @@ struct TspHermesCallbackData {
 TspInt32 TspHermesRequest(Tsp *tsp, int method, const char *uri, int timeout);
 // Cancel a hermes request.
 void TspHermesCancel(Tsp *tsp, TspInt32 req_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  // TINY_SPOTIFY_H_
 

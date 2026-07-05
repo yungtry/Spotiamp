@@ -23,12 +23,18 @@ struct ZipFile {
   ZipFile(FileIO *file_io, bool owns_file_io) : file_io(file_io), owns_file_io(owns_file_io) {}
 };
 
-// TODO: reading and writing of these structures should be made endianness-safe,
-// even though windows is the only platform that uses ZipFileReader so far.
-#if defined(_WIN32)
+// These structs map directly onto the on-disk ZIP format and must have no
+// padding bytes, regardless of platform.
+#if defined(_MSC_VER)
 #pragma pack(push, 1)
+#define PACKED_STRUCT
+#elif defined(__GNUC__) || defined(__clang__)
+#define PACKED_STRUCT __attribute__((packed))
+#else
+#define PACKED_STRUCT
 #endif
-struct ZipLocalFileHeader {
+
+struct PACKED_STRUCT ZipLocalFileHeader {
   uint32 sig;
   uint16 ver;
   uint16 flags;
@@ -41,14 +47,16 @@ struct ZipLocalFileHeader {
   uint16 filename_len;
   uint16 extra_len;
 };
-struct ZipDescriptor {
+struct PACKED_STRUCT ZipDescriptor {
   uint32 crc;
   uint32 compress_size;
   uint32 decompress_size;
 };
-#if defined(_WIN32)
+
+#if defined(_MSC_VER)
 #pragma pack(pop)
 #endif
+#undef PACKED_STRUCT
 
 static bool ZipFile_ReadDirectoryInt(ZipFile *zip) {
   ZipLocalFileHeader hdr;
