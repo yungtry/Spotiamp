@@ -9,6 +9,7 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <thread>
 #if defined(OS_WIN)
 #include <wininet.h>
 #endif
@@ -1817,12 +1818,10 @@ void PlaylistWindow::PaintFull() {
       Fill(12, y, width() - 12 - 19, row_height_, g_color_bg_selected);
     
     // Color priority: currently playing always gets g_color_current.
-    // Selected-but-not-playing also gets g_color_current so it reads
-    // clearly over the selection background. Everything else is g_color_normal.
+    // Selected-but-not-playing gets g_color_normal so it draws with standard
+    // playlist text color on the SelectedBG background, matching Winamp.
     unsigned int text_color;
     if (is_playing)
-      text_color = g_color_current;
-    else if (selected_item_ == j)
       text_color = g_color_current;
     else
       text_color = g_color_normal;
@@ -2694,13 +2693,30 @@ void CoverArtWindow::SetImage(const char* image) {
 	}
 
 	std::string spotifyImageUrl = image_;
+	if (spotifyImageUrl.length() <= 14 || spotifyImageUrl.compare(0, 14, "spotify:image:") != 0) {
+		PlatformDeleteBitmap(bitmap_);
+		bitmap_ = NULL;
+		Repaint();
+		return;
+	}
+
 	std::string imageUrl = "https://i.scdn.co/image/" + spotifyImageUrl.substr(14); // Make URL from the URI
 
-    buffer_.clear();
-    DownloadFile(imageUrl.c_str(), buffer_);
-
-	Load();
-	Repaint();
+	std::thread([this, imageUrl]() {
+		std::vector<char> local_buffer;
+		DownloadFile(imageUrl.c_str(), local_buffer);
+		RunOnMainThread([this, local_buffer = std::move(local_buffer), imageUrl]() {
+			std::string currentImageUrl;
+			if (image_.length() > 14 && image_.compare(0, 14, "spotify:image:") == 0) {
+				currentImageUrl = "https://i.scdn.co/image/" + image_.substr(14);
+			}
+			if (imageUrl == currentImageUrl) {
+				buffer_ = std::move(local_buffer);
+				Load();
+				Repaint();
+			}
+		});
+	}).detach();
 }
 
 #include <fstream>

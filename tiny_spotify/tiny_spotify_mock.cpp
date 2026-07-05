@@ -1,5 +1,6 @@
 #include "tiny_spotify.h"
 #include <string>
+#include <curl/curl.h>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -317,41 +318,82 @@ static std::string Trim(const std::string &str) {
   return str.substr(first, (last - first + 1));
 }
 
-// Helper function to execute curl requests
-static std::string HttpGet(const std::string &url, const std::string &token) {
-  std::string cmd = "curl -s --max-time 10 --connect-timeout 5 -H \"Authorization: Bearer " + token + "\" \"" + url + "\"";
-  FILE *pipe = popen(cmd.c_str(), "r");
-  if (!pipe) return "";
-  char buffer[1024];
-  std::string result = "";
-  while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-    result += buffer;
+static size_t CurlWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+  ((std::string*)userp)->append((char*)contents, size * nmemb);
+  return size * nmemb;
+}
+
+static std::mutex g_curl_mutex;
+
+static std::string PerformHttpRequest(const std::string &method, const std::string &url, const std::string &token, const std::string &data) {
+  std::lock_guard<std::mutex> lock(g_curl_mutex);
+  
+  static CURL* curl = nullptr;
+  if (!curl) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl = curl_easy_init();
   }
-  pclose(pipe);
-  return result;
+  if (!curl) return "";
+
+  // Reset options to default values to avoid leakage from previous requests
+  curl_easy_reset(curl);
+
+  std::string response;
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+
+  // Set HTTP Method
+  if (method == "POST") {
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    if (!data.empty()) {
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)data.size());
+    } else {
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    }
+  } else if (method == "PUT") {
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    if (!data.empty()) {
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)data.size());
+    }
+  } else if (method == "GET") {
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+  } else {
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+  }
+
+  // Set Headers
+  struct curl_slist* headers = nullptr;
+  std::string auth_header = "Authorization: Bearer " + token;
+  headers = curl_slist_append(headers, auth_header.c_str());
+  if (!data.empty()) {
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+  }
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+  // Perform
+  CURLcode res = curl_easy_perform(curl);
+  
+  // Cleanup headers
+  curl_slist_free_all(headers);
+
+  if (res != CURLE_OK) {
+    return "";
+  }
+  return response;
+}
+
+static std::string HttpGet(const std::string &url, const std::string &token) {
+  return PerformHttpRequest("GET", url, token, "");
 }
 
 static std::string HttpPostOrPut(const std::string &method, const std::string &url, const std::string &token, const std::string &data = "") {
-  std::string cmd = "curl -s --max-time 10 --connect-timeout 5 -X " + method + " -H \"Authorization: Bearer " + token + "\"";
-  if (!data.empty()) {
-    // Escape single quotes for shell command safety
-    std::string escaped_data = "";
-    for (char c : data) {
-      if (c == '\'') escaped_data += "'\\''";
-      else escaped_data += c;
-    }
-    cmd += " -H \"Content-Type: application/json\" -d '" + escaped_data + "'";
-  }
-  cmd += " \"" + url + "\"";
-  FILE *pipe = popen(cmd.c_str(), "r");
-  if (!pipe) return "";
-  char buffer[1024];
-  std::string result = "";
-  while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-    result += buffer;
-  }
-  pclose(pipe);
-  return result;
+  return PerformHttpRequest(method, url, token, data);
 }
 
 static void HttpPostOrPutAsync(const std::string &method, const std::string &url, const std::string &token, const std::string &data = "") {
@@ -783,15 +825,33 @@ static std::string ExtractSpotifyUri(const std::string &json, const std::string 
 
 static std::string GetSpotiampDeviceIdFromToken(const std::string &access_token) {
   if (access_token.empty()) return "";
+  static std::mutex device_cache_mutex;
+  static std::string cached_token;
+  static std::string cached_device_id;
+  {
+    std::lock_guard<std::mutex> lock(device_cache_mutex);
+    if (cached_token == access_token && !cached_device_id.empty()) {
+      return cached_device_id;
+    }
+  }
+
   std::string devices_json = HttpGet("https://api.spotify.com/v1/me/player/devices", access_token);
   auto devices = JsonExtractArray(devices_json, "devices");
+  std::string found_id = "";
   for (const auto &dev : devices) {
     std::string name = JsonExtractString(dev, "name");
     if (name == "Spotiamp") {
-      return JsonExtractString(dev, "id");
+      found_id = JsonExtractString(dev, "id");
+      break;
     }
   }
-  return "";
+
+  if (!found_id.empty()) {
+    std::lock_guard<std::mutex> lock(device_cache_mutex);
+    cached_token = access_token;
+    cached_device_id = found_id;
+  }
+  return found_id;
 }
 
 static std::string GetSpotiampDeviceId(Tsp *tsp) {
@@ -969,10 +1029,6 @@ static void PollThreadProc(Tsp *tsp) {
         old_pos = CurrentPlayerPositionMsLocked(tsp);
         old_is_playing = tsp->is_playing;
       }
-      int shuffle = JsonExtractInt(response, "shuffle_state");
-      std::string repeat_state = JsonExtractString(response, "repeat_state");
-      bool repeat = (repeat_state != "off" && !repeat_state.empty());
-      
       size_t item_pos = 0;
       if (JsonHasObjectValue(response, "item", &item_pos)) {
         std::string item_json = response.substr(item_pos);
@@ -1002,9 +1058,6 @@ static void PollThreadProc(Tsp *tsp) {
         }
         
         std::lock_guard<std::mutex> lock(tsp->mutex);
-        controls_changed = (tsp->shuffle != (shuffle != 0)) || (tsp->repeat != repeat);
-        tsp->shuffle = shuffle != 0;
-        tsp->repeat = repeat;
         long long now_ms = NowMonotonicMs();
         bool command_in_flight = tsp->local_control_until_ms > now_ms;
         bool suppress_play_state = command_in_flight && tsp->local_desired_playing != is_p;
@@ -1048,10 +1101,6 @@ static void PollThreadProc(Tsp *tsp) {
           now_playing_changed = true;
         }
       } else {
-        std::lock_guard<std::mutex> lock(tsp->mutex);
-        controls_changed = (tsp->shuffle != (shuffle != 0)) || (tsp->repeat != repeat);
-        tsp->shuffle = shuffle != 0;
-        tsp->repeat = repeat;
       }
 
       if (now_playing_changed) {
@@ -1769,20 +1818,23 @@ TSP_PUBLIC TspError TspPlayerSeek(Tsp *tsp, int position_ms) {
       resume_after_seek = tsp->is_playing;
       tsp->player_position_ms = position_ms;
       tsp->player_position_updated_ms = NowMonotonicMs();
-      tsp->is_playing = false;
+      tsp->is_playing = resume_after_seek;
       tsp->local_desired_playing = resume_after_seek;
       tsp->local_expected_position_ms = position_ms;
       tsp->local_stopped = false;
       tsp->local_control_until_ms = NowMonotonicMs() + 7000;
     }
-    if (resume_after_seek)
+    if (resume_after_seek) {
+      DispatchAudioControl(tsp, kTspAudioFlag_FlushBuffer);
+    } else {
       DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
+      DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
+    }
     std::string access_token = GetAccessToken(tsp);
     if (!access_token.empty()) {
       std::string url = "https://api.spotify.com/v1/me/player/seek?position_ms=" + std::to_string(position_ms);
       HttpPostOrPutDeviceAsync("PUT", url, access_token);
     }
-    DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
   }
   return kTspErrorOk;
 }

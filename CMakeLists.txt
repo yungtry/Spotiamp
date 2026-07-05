@@ -137,4 +137,7 @@ if(MSVC)
     set_property(TARGET spotiamp APPEND PROPERTY LINK_FLAGS "/NXCOMPAT:NO /SAFESEH:NO")
 endif()
 
-target_link_libraries(spotiamp ${SDL2_LIBRARIES} ${SPOTIAMP_LIBS})
+find_package(CURL REQUIRED)
+include_directories(${CURL_INCLUDE_DIRS})
+
+target_link_libraries(spotiamp ${SDL2_LIBRARIES} ${SPOTIAMP_LIBS} ${CURL_LIBRARIES})

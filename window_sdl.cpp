@@ -14,6 +14,7 @@
 
 static ZipFile *current_skin_zip = NULL;
 static std::string current_skin_basedir;
+static SDL_Surface *g_pledit_text_surface = NULL;
 
 class SimpleFileIO : public FileIO {
   FILE *f_;
@@ -137,7 +138,8 @@ void PlatformWindow::DrawText(int x, int y, int w, int h, const char *text, int 
     start_x = x + w - text_width;
   }
   
-  SDL_Surface *srcb = (SDL_Surface*)res.text;
+  SDL_Surface *srcb = g_pledit_text_surface ? g_pledit_text_surface : (SDL_Surface*)res.text;
+  if (!srcb) return;
 
   // Make the bitmap background (#181818) transparent so glyphs render
   // cleanly over any background (selection highlight, normal bg, etc.).
@@ -159,7 +161,7 @@ void PlatformWindow::DrawText(int x, int y, int w, int h, const char *text, int 
     if (cur_x + 5 > x + w) break;
     
     if (cur_x >= x) {
-      Blit(cur_x, top_y, 5, 6, res.text, (glyph % 31) * 5, (glyph / 31) * 6);
+      Blit(cur_x, top_y, 5, 6, (Bitmap*)srcb, (glyph % 31) * 5, (glyph / 31) * 6);
     }
     cur_x += 6;
   }
@@ -444,6 +446,49 @@ Bitmap *PlatformLoadBitmapFromBuf(const void *data, size_t data_size) {
   return (Bitmap*)surf;
 }
 
+static void PlatformPostProcessTextBitmap(Bitmap *bitmap) {
+  SDL_Surface *surf = (SDL_Surface*)bitmap;
+  if (!surf) return;
+
+  if (g_pledit_text_surface) {
+    SDL_FreeSurface(g_pledit_text_surface);
+    g_pledit_text_surface = NULL;
+  }
+
+  if (surf->w <= 150) return;
+
+  // Convert to 32-bit RGBA format so we can work with true colors
+  // and avoid any palette limitations of 8-bit Winamp bitmaps.
+  g_pledit_text_surface = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA8888, 0);
+  if (!g_pledit_text_surface) return;
+
+  if (SDL_MUSTLOCK(g_pledit_text_surface)) {
+    SDL_LockSurface(g_pledit_text_surface);
+  }
+
+  // Get background color key from space character glyph at (150, 0)
+  uint32_t *pixels = (uint32_t *)g_pledit_text_surface->pixels;
+  uint32_t original_color_key = pixels[150];
+
+  uint32_t white_pixel = SDL_MapRGBA(g_pledit_text_surface->format, 255, 255, 255, 255);
+  uint32_t target_bg_pixel = SDL_MapRGBA(g_pledit_text_surface->format, 0x18, 0x18, 0x18, 255);
+
+  // Convert all background pixels to target_bg_pixel (0x181818)
+  // and all non-background pixels to white_pixel (0xFFFFFF)
+  int num_pixels = g_pledit_text_surface->w * g_pledit_text_surface->h;
+  for (int i = 0; i < num_pixels; ++i) {
+    if (pixels[i] == original_color_key) {
+      pixels[i] = target_bg_pixel;
+    } else {
+      pixels[i] = white_pixel;
+    }
+  }
+
+  if (SDL_MUSTLOCK(g_pledit_text_surface)) {
+    SDL_UnlockSurface(g_pledit_text_surface);
+  }
+}
+
 bool PlatformLoadBitmap(Bitmap **bitmap, const char *name) {
   if (*bitmap) {
     SDL_FreeSurface((SDL_Surface*)*bitmap);
@@ -452,9 +497,7 @@ bool PlatformLoadBitmap(Bitmap **bitmap, const char *name) {
   std::string zipdata;
   if (current_skin_zip && ZipFileReader::ReadFileToString(current_skin_zip, name, &zipdata)) {
     *bitmap = PlatformLoadBitmapFromBuf(zipdata.data(), zipdata.size());
-    if (*bitmap) return true;
-  }
-  if (current_skin_basedir.size()) {
+  } else if (current_skin_basedir.size()) {
     std::string path = current_skin_basedir + name;
     #if !defined(_WIN32)
     std::replace(path.begin(), path.end(), '\\', '/');
@@ -464,6 +507,9 @@ bool PlatformLoadBitmap(Bitmap **bitmap, const char *name) {
   if (!*bitmap) {
     std::string path = std::string("skin/") + name;
     *bitmap = (Bitmap*)SDL_LoadBMP(path.c_str());
+  }
+  if (*bitmap && strcmp(name, "text.bmp") == 0) {
+    PlatformPostProcessTextBitmap(*bitmap);
   }
   return *bitmap != NULL;
 }
@@ -491,6 +537,10 @@ bool PlatformLoadString(const char *name, std::string *result) {
 }
 
 void PlatformSetSkin(const char *filename) {
+  if (g_pledit_text_surface) {
+    SDL_FreeSurface(g_pledit_text_surface);
+    g_pledit_text_surface = NULL;
+  }
   if (current_skin_zip) {
     ZipFileReader::Free(current_skin_zip);
     current_skin_zip = NULL;
