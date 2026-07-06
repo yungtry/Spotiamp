@@ -13,6 +13,7 @@ pkg_check_modules(SDL2 REQUIRED sdl2)
 # ---------------------------------------------------------------------------
 set(CREDENTIALS_DIR "${CMAKE_BINARY_DIR}/generated")
 set(CREDENTIALS_H   "${CREDENTIALS_DIR}/credentials.h")
+set(SRC_DIR         "${CMAKE_SOURCE_DIR}/src")
 
 # Read env vars at configure time
 set(SPOTIAMP_CLIENT_ID     "$ENV{SPOTIFY_CLIENT_ID}")
@@ -50,75 +51,77 @@ else()
 endif()
 
 include_directories("${CREDENTIALS_DIR}")
+include_directories("${SRC_DIR}")
+include_directories("${SRC_DIR}/tiny_spotify")
+include_directories("${SRC_DIR}/winamp_sdk")
 
 set(SPOTIAMP_SRCS
-    commands.h
-    dialogs.h
-    resource.h
-    spotifyamp.cpp
-    spotifyamp.h
-    stdafx.h
-    targetver.h
-    window.cpp
-    window.h
-    window_sdl.cpp
-    window_sdl.h
-    visplugin.h
-    zipfile.cpp
-    zipfile.h
-    audio_eq.c
-    audio_eq.h
-    fpu_util.h
-    tinfl.c
-    tinfl.h
-    shoutcast.h
-    mp3.h
-    build_config.h
-    config.h
-    types.h
-    util.h
-    appkey.h
-    tiny_spotify/tiny_spotify.h
+    ${SRC_DIR}/commands.h
+    ${SRC_DIR}/dialogs.h
+    ${SRC_DIR}/resource.h
+    ${SRC_DIR}/spotifyamp.cpp
+    ${SRC_DIR}/spotifyamp.h
+    ${SRC_DIR}/stdafx.h
+    ${SRC_DIR}/targetver.h
+    ${SRC_DIR}/window.cpp
+    ${SRC_DIR}/window.h
+    ${SRC_DIR}/window_sdl.cpp
+    ${SRC_DIR}/window_sdl.h
+    ${SRC_DIR}/visplugin.h
+    ${SRC_DIR}/zipfile.cpp
+    ${SRC_DIR}/zipfile.h
+    ${SRC_DIR}/audio_eq.c
+    ${SRC_DIR}/audio_eq.h
+    ${SRC_DIR}/fpu_util.h
+    ${SRC_DIR}/tinfl.c
+    ${SRC_DIR}/tinfl.h
+    ${SRC_DIR}/shoutcast.h
+    ${SRC_DIR}/mp3.h
+    ${SRC_DIR}/build_config.h
+    ${SRC_DIR}/config.h
+    ${SRC_DIR}/types.h
+    ${SRC_DIR}/util.h
+    ${SRC_DIR}/appkey.h
+    ${SRC_DIR}/tiny_spotify/tiny_spotify.h
 )
 
 # Cross-platform source files selection
 if(WIN32 AND NOT FORCE_SDL)
     list(APPEND SPOTIAMP_SRCS
-        dialogs_win32.cpp
-        window_win32.cpp
-        window_win32.h
-        audio_win32.c
-        vis.cpp
-        visplugin.cpp
-        com_ptr.h
-        tiny_spotify/tiny_spotify.obj
-        spotifyamp.rc
-        app.manifest
+        ${SRC_DIR}/dialogs_win32.cpp
+        ${SRC_DIR}/window_win32.cpp
+        ${SRC_DIR}/window_win32.h
+        ${SRC_DIR}/audio_win32.c
+        ${SRC_DIR}/vis.cpp
+        ${SRC_DIR}/visplugin.cpp
+        ${SRC_DIR}/com_ptr.h
+        ${SRC_DIR}/tiny_spotify/tiny_spotify.obj
+        ${SRC_DIR}/spotifyamp.rc
+        ${SRC_DIR}/app.manifest
     )
 else()
     # macOS, Linux, or forced SDL
     if(APPLE)
         list(APPEND SPOTIAMP_SRCS
-            dialogs_mac.mm
-            audio_sdl.cpp
-            vis_sdl.cpp
-            tiny_spotify/tiny_spotify_mock.cpp
+            ${SRC_DIR}/dialogs_mac.mm
+            ${SRC_DIR}/audio_sdl.cpp
+            ${SRC_DIR}/vis_sdl.cpp
+            ${SRC_DIR}/tiny_spotify/tiny_spotify_mock.cpp
         )
         find_library(COCOA_LIBRARY Cocoa)
         list(APPEND SPOTIAMP_LIBS ${COCOA_LIBRARY})
     else()
         list(APPEND SPOTIAMP_SRCS
-            dialogs_sdl.cpp
-            audio_sdl.cpp
-            vis_sdl.cpp
-            tiny_spotify/tiny_spotify_mock.cpp
+            ${SRC_DIR}/dialogs_sdl.cpp
+            ${SRC_DIR}/audio_sdl.cpp
+            ${SRC_DIR}/vis_sdl.cpp
+            ${SRC_DIR}/tiny_spotify/tiny_spotify_mock.cpp
         )
     endif()
     add_definitions(-DWITH_SDL)
 endif()
 
 # Include directories
-include_directories(tiny_spotify)
 include_directories(${SDL2_INCLUDE_DIRS})
 link_directories(${SDL2_LIBRARY_DIRS})
 
