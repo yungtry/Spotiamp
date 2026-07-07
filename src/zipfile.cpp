@@ -6,6 +6,14 @@
 #include <vector>
 #include "tinfl.h"
 
+#include <string.h>
+#ifdef _WIN32
+#define stricmp _stricmp
+#else
+#include <strings.h>
+#define stricmp strcasecmp
+#endif
+
 
 struct ZipFileName {
   std::string name;

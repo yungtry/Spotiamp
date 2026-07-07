@@ -122,10 +122,10 @@ if(WIN32)
         ${SRC_DIR}/windows_resources.rc
         ${SRC_DIR}/icon.ico
     )
-    list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32)
+    list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv)
 endif()
 
-add_executable(spotiamp ${SPOTIAMP_SRCS})
+add_executable(spotiamp WIN32 ${SPOTIAMP_SRCS})
 
 target_compile_definitions(spotiamp PRIVATE WITH_SDL)
 
@@ -224,6 +224,8 @@ add_custom_command(TARGET spotiamp POST_BUILD
 # Linking
 if(MSVC)
     set_property(TARGET spotiamp APPEND PROPERTY LINK_FLAGS "/NXCOMPAT:NO /SAFESEH:NO")
+elseif(MINGW)
+    target_link_options(spotiamp PRIVATE "-static" "-static-libgcc" "-static-libstdc++")
 endif()
 
 target_link_libraries(spotiamp PRIVATE ${SPOTIAMP_SDL_LIBS} ${SPOTIAMP_PLATFORM_LIBS} ${SPOTIAMP_CURL_LIBS})

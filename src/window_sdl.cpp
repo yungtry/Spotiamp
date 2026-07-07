@@ -747,6 +747,9 @@ void OpenUrl(const char *url) {
 #if defined(__APPLE__)
   std::string cmd = std::string("open \"") + url + "\"";
   system(cmd.c_str());
+#elif defined(_WIN32)
+  std::string cmd = std::string("start \"\" \"") + url + "\"";
+  system(cmd.c_str());
 #endif
 }
 
@@ -1339,3 +1342,10 @@ static bool HandleActiveMenuEvent(SDL_Event *event) {
 }
 
 #endif  // defined(WITH_SDL)
+
+#ifdef _WIN32
+#include <windows.h>
+int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmdshow) {
+    return main(__argc, __argv);
+}
+#endif

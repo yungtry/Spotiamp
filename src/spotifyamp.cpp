@@ -28,6 +28,13 @@ extern "C" {
 #define MAX_PATH 260
 #endif  // MAX_PATH
 
+#ifdef _WIN32
+#undef DrawText
+#undef GetWindowText
+#undef SetWindowText
+#endif
+
+
 #define kEllipsis 1
 #define arraysize(x) (sizeof(x)/sizeof(x[0]))
 

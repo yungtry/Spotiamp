@@ -467,7 +467,11 @@ static void EnsureDir(const std::string &path) {
       if (!partial.empty() && partial.back() != '/')
         partial += '/';
       partial += part;
+#ifdef _WIN32
+      mkdir(partial.c_str());
+#else
       mkdir(partial.c_str(), 0755);
+#endif
     }
     if (slash == std::string::npos)
       break;

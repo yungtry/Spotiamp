@@ -17,6 +17,7 @@ class SpotiampConan(ConanFile):
     default_options = {
         "sdl/*:shared": False,
         "libcurl/*:shared": False,
+        "libcurl/*:with_ssl": "schannel",
     }
 
     def layout(self):

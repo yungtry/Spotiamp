@@ -99,6 +99,10 @@ private:
   int drag_start_x_, drag_start_y_;
 };
 
+#ifndef MAX_PATH
+#define MAX_PATH 260
+#endif
+
 class FileEnumerator {
 public:
   explicit FileEnumerator(const char *directory);
