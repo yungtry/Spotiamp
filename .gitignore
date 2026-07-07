@@ -6,6 +6,7 @@ releases/
 refresh_token.txt
 librespot_err.log
 .DS_Store
+CMakeUserPresets.json
 
 # Generated at build time — never commit
 generated/credentials.h
