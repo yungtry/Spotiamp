@@ -71,11 +71,7 @@ class PlatformWindowBase {
   const char *GetPositionKey(const char *side);
 };
 
-#if defined(WITH_SDL)
 #include "window_sdl.h"
-#else
-#include "window_win32.h"
-#endif
 
 template <>
 void PlatformWindowBase<PlatformWindow>::SizeChanged();

@@ -9,14 +9,29 @@
 #include <iostream>
 #include <sstream>
 #include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32)
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <io.h>
+#define popen _popen
+#define pclose _pclose
+typedef int ssize_t;
+#else
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
 
 // Struct definitions
 struct TspItem {
@@ -94,9 +109,6 @@ struct Tsp {
   }
 };
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <fstream>
 
 void OpenUrl(const char *url);
@@ -104,11 +116,80 @@ extern "C" void WavSetVolume(int vol);
 
 // Global variables
 static Tsp *g_global_tsp = NULL;
+#if defined(_WIN32)
+static PROCESS_INFORMATION g_librespot_process = {};
+static HANDLE g_librespot_stdout = INVALID_HANDLE_VALUE;
+#else
 static pid_t g_librespot_pid = 0;
 static int g_librespot_stdout_fd = -1;
+#endif
 static std::vector<std::string> g_radio_seed_uris;
 
 static std::string GetSpotiampDeviceIdFromToken(const std::string &access_token);
+
+static void SleepForMicroseconds(int usec) {
+#if defined(_WIN32)
+  Sleep((DWORD)((usec + 999) / 1000));
+#else
+  usleep(usec);
+#endif
+}
+
+static void SleepForSeconds(int seconds) {
+#if defined(_WIN32)
+  Sleep((DWORD)seconds * 1000);
+#else
+  sleep(seconds);
+#endif
+}
+
+#if defined(_WIN32)
+typedef SOCKET SocketHandle;
+static const SocketHandle kInvalidSocket = INVALID_SOCKET;
+
+static bool EnsureSocketLayer() {
+  static std::once_flag winsock_once;
+  static bool winsock_ok = false;
+  std::call_once(winsock_once, []() {
+    WSADATA data;
+    winsock_ok = WSAStartup(MAKEWORD(2, 2), &data) == 0;
+  });
+  return winsock_ok;
+}
+
+static void CloseSocketHandle(SocketHandle socket_handle) {
+  if (socket_handle != kInvalidSocket)
+    closesocket(socket_handle);
+}
+
+static int SocketRead(SocketHandle socket_handle, char *buffer, int size) {
+  return recv(socket_handle, buffer, size, 0);
+}
+
+static int SocketWrite(SocketHandle socket_handle, const char *buffer, int size) {
+  return send(socket_handle, buffer, size, 0);
+}
+#else
+typedef int SocketHandle;
+static const SocketHandle kInvalidSocket = -1;
+
+static bool EnsureSocketLayer() {
+  return true;
+}
+
+static void CloseSocketHandle(SocketHandle socket_handle) {
+  if (socket_handle >= 0)
+    close(socket_handle);
+}
+
+static int SocketRead(SocketHandle socket_handle, char *buffer, int size) {
+  return (int)read(socket_handle, buffer, size);
+}
+
+static int SocketWrite(SocketHandle socket_handle, const char *buffer, int size) {
+  return (int)write(socket_handle, buffer, size);
+}
+#endif
 
 static long long NowMonotonicMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -514,11 +595,12 @@ static std::string RefreshAccessToken(const std::string &refresh_token, const st
 }
 
 static std::string ListenForAuthCode() {
-  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) return "";
+  if (!EnsureSocketLayer()) return "";
+  SocketHandle server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd == kInvalidSocket) return "";
   
   int opt = 1;
-  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
   
   struct sockaddr_in address;
   memset(&address, 0, sizeof(address));
@@ -527,12 +609,12 @@ static std::string ListenForAuthCode() {
   address.sin_port = htons(3000);
   
   if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-    close(server_fd);
+    CloseSocketHandle(server_fd);
     return "";
   }
   
   if (listen(server_fd, 1) < 0) {
-    close(server_fd);
+    CloseSocketHandle(server_fd);
     return "";
   }
   
@@ -547,21 +629,25 @@ static std::string ListenForAuthCode() {
   tv.tv_sec = 60;
   tv.tv_usec = 0;
   
+#if defined(_WIN32)
+  int sel = select(0, &fds, NULL, NULL, &tv);
+#else
   int sel = select(server_fd + 1, &fds, NULL, NULL, &tv);
+#endif
   if (sel <= 0) {
     std::cout << "Spotify authorization timed out." << std::endl;
-    close(server_fd);
+    CloseSocketHandle(server_fd);
     return "";
   }
   
-  int client_fd = accept(server_fd, NULL, NULL);
-  if (client_fd < 0) {
-    close(server_fd);
+  SocketHandle client_fd = accept(server_fd, NULL, NULL);
+  if (client_fd == kInvalidSocket) {
+    CloseSocketHandle(server_fd);
     return "";
   }
   
   char buffer[4096];
-  ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+  int bytes_read = SocketRead(client_fd, buffer, sizeof(buffer) - 1);
   std::string code = "";
   if (bytes_read > 0) {
     buffer[bytes_read] = '\0';
@@ -581,11 +667,11 @@ static std::string ListenForAuthCode() {
                            "<h2>Spotiamp Authorized Successfully!</h2>"
                            "<p>You can close this tab and return to the Spotiamp application.</p>"
                            "</body></html>";
-    write(client_fd, response.c_str(), response.length());
+    SocketWrite(client_fd, response.c_str(), (int)response.length());
   }
   
-  close(client_fd);
-  close(server_fd);
+  CloseSocketHandle(client_fd);
+  CloseSocketHandle(server_fd);
   return code;
 }
 
@@ -1495,6 +1581,149 @@ static std::string GetSpotiampDeviceId(Tsp *tsp) {
 }
 
 // Subprocess control
+#if defined(_WIN32)
+static std::string QuoteWindowsArg(const std::string &arg) {
+  std::string out = "\"";
+  for (char c : arg) {
+    if (c == '"' || c == '\\')
+      out += '\\';
+    out += c;
+  }
+  out += "\"";
+  return out;
+}
+
+static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
+  if (g_librespot_process.hProcess || g_librespot_stdout != INVALID_HANDLE_VALUE)
+    return;
+
+  SECURITY_ATTRIBUTES sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE read_pipe = INVALID_HANDLE_VALUE;
+  HANDLE write_pipe = INVALID_HANDLE_VALUE;
+  if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0))
+    return;
+  SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+  HANDLE log_file = CreateFileA("librespot_err.log", GENERIC_WRITE,
+                                FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+  if (log_file == INVALID_HANDLE_VALUE)
+    log_file = GetStdHandle(STD_ERROR_HANDLE);
+
+  std::vector<std::string> args_vec;
+  args_vec.push_back("librespot");
+  args_vec.push_back("-B");
+  args_vec.push_back("pipe");
+  args_vec.push_back("-f");
+  args_vec.push_back("S16");
+  args_vec.push_back("-R");
+  args_vec.push_back("100");
+  args_vec.push_back("-E");
+  args_vec.push_back("fixed");
+  args_vec.push_back("-n");
+  args_vec.push_back("Spotiamp");
+
+  if (token && *token) {
+    args_vec.push_back("-k");
+    args_vec.push_back(token);
+  } else if (user && *user && pass && *pass) {
+    args_vec.push_back("-u");
+    args_vec.push_back(user);
+    args_vec.push_back("-p");
+    args_vec.push_back(pass);
+  }
+
+  std::string command_line;
+  for (size_t i = 0; i < args_vec.size(); ++i) {
+    if (i > 0)
+      command_line += " ";
+    command_line += QuoteWindowsArg(args_vec[i]);
+  }
+
+  STARTUPINFOA si;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = write_pipe;
+  si.hStdError = log_file;
+
+  PROCESS_INFORMATION pi;
+  memset(&pi, 0, sizeof(pi));
+  std::vector<char> mutable_command(command_line.begin(), command_line.end());
+  mutable_command.push_back('\0');
+  BOOL ok = CreateProcessA(NULL, mutable_command.data(), NULL, NULL, TRUE,
+                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
+  CloseHandle(write_pipe);
+  if (log_file != INVALID_HANDLE_VALUE && log_file != GetStdHandle(STD_ERROR_HANDLE))
+    CloseHandle(log_file);
+
+  if (!ok) {
+    CloseHandle(read_pipe);
+    return;
+  }
+
+  g_librespot_process = pi;
+  g_librespot_stdout = read_pipe;
+}
+
+static void KillLibrespot() {
+  if (g_librespot_process.hProcess) {
+    TerminateProcess(g_librespot_process.hProcess, 0);
+    WaitForSingleObject(g_librespot_process.hProcess, 3000);
+    CloseHandle(g_librespot_process.hThread);
+    CloseHandle(g_librespot_process.hProcess);
+    memset(&g_librespot_process, 0, sizeof(g_librespot_process));
+  }
+  if (g_librespot_stdout != INVALID_HANDLE_VALUE) {
+    CloseHandle(g_librespot_stdout);
+    g_librespot_stdout = INVALID_HANDLE_VALUE;
+  }
+}
+
+static bool LibrespotOutputAvailable() {
+  return g_librespot_stdout != INVALID_HANDLE_VALUE;
+}
+
+static int ReadLibrespotOutput(char *buffer, int size) {
+  if (g_librespot_stdout == INVALID_HANDLE_VALUE)
+    return -1;
+  DWORD bytes_read = 0;
+  if (!ReadFile(g_librespot_stdout, buffer, (DWORD)size, &bytes_read, NULL))
+    return -1;
+  return (int)bytes_read;
+}
+
+static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buffer_size) {
+  if (g_librespot_stdout == INVALID_HANDLE_VALUE)
+    return;
+
+  while (true) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(g_librespot_stdout, NULL, 0, NULL, &available, NULL) || available == 0)
+      break;
+
+    DWORD to_read = available;
+    if (to_read > (DWORD)(buffer_size - *residual_count))
+      to_read = (DWORD)(buffer_size - *residual_count);
+
+    DWORD bytes_read = 0;
+    if (!ReadFile(g_librespot_stdout, buffer + *residual_count, to_read, &bytes_read, NULL) || bytes_read == 0)
+      break;
+
+    int total_bytes = *residual_count + (int)bytes_read;
+    int process_bytes = total_bytes & ~3;
+    *residual_count = total_bytes - process_bytes;
+    if (*residual_count > 0)
+      memmove(buffer, buffer + process_bytes, *residual_count);
+  }
+}
+#else
 static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
   int pipefd[2];
   if (pipe(pipefd) < 0) return;
@@ -1563,6 +1792,16 @@ static void KillLibrespot() {
   }
 }
 
+static bool LibrespotOutputAvailable() {
+  return g_librespot_stdout_fd >= 0;
+}
+
+static int ReadLibrespotOutput(char *buffer, int size) {
+  if (g_librespot_stdout_fd < 0)
+    return -1;
+  return (int)read(g_librespot_stdout_fd, buffer, size);
+}
+
 static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buffer_size) {
   if (g_librespot_stdout_fd < 0)
     return;
@@ -1590,6 +1829,7 @@ static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buf
       memmove(buffer, buffer + process_bytes, *residual_count);
   }
 }
+#endif
 
 // Background threads
 static void AudioThreadProc(Tsp *tsp) {
@@ -1620,24 +1860,24 @@ static void AudioThreadProc(Tsp *tsp) {
       }
       if (hold_audio)
         DrainLibrespotPipeAligned(buffer, &residual_count, chunk_size);
-      usleep(10000);
+      SleepForMicroseconds(10000);
       continue;
     } else if (output_paused) {
       DispatchAudioControl(tsp, kTspAudioFlag_FlushBuffer);
       output_paused = false;
     }
 
-    if (g_librespot_stdout_fd < 0) {
-      usleep(10000);
+    if (!LibrespotOutputAvailable()) {
+      SleepForMicroseconds(10000);
       continue;
     }
 
-    ssize_t bytes_read = read(g_librespot_stdout_fd, buffer + residual_count, chunk_size - residual_count);
+    int bytes_read = ReadLibrespotOutput(buffer + residual_count, chunk_size - residual_count);
     if (bytes_read <= 0) {
       if (bytes_read == 0) {
         break;
       }
-      usleep(10000);
+      SleepForMicroseconds(10000);
       continue;
     }
 
@@ -1657,7 +1897,7 @@ static void AudioThreadProc(Tsp *tsp) {
         if (written > 0) {
           offset += written;
         } else {
-          usleep(5000);
+          SleepForMicroseconds(5000);
         }
       }
     }
@@ -1679,7 +1919,7 @@ static void PollThreadProc(Tsp *tsp) {
       }
     }
     if (access_token.empty()) {
-      sleep(1);
+      SleepForSeconds(1);
       continue;
     }
     
@@ -1804,7 +2044,7 @@ static void PollThreadProc(Tsp *tsp) {
         sleep_steps = 3;
     }
     for (int i = 0; i < sleep_steps && tsp->poll_thread_running; ++i) {
-      usleep(100000);
+      SleepForMicroseconds(100000);
       if (sleep_steps == 20) {
         std::lock_guard<std::mutex> lock(tsp->mutex);
         if (CommandInFlightLocked(tsp, NowMonotonicMs()))
@@ -2275,7 +2515,7 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *username, const char *passwor
     
     tsp->rootlist = all_playlists;
     
-    usleep(500000); // 0.5s pause for visual responsiveness
+    SleepForMicroseconds(500000); // 0.5s pause for visual responsiveness
     
     if (tsp->callback) {
       tsp->callback(tsp->callback_context, kTspCallbackEvent_Connected, NULL, NULL);
@@ -2486,7 +2726,7 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
         HttpPostOrPut("PUT", UrlWithDeviceId("https://api.spotify.com/v1/me/player/play", device_id),
                       access_token, data);
         for (int attempt = 0; attempt < 5; ++attempt) {
-          usleep(500000);
+          SleepForMicroseconds(500000);
           if (RefreshPlayerListFromQueue(tsp, access_token, context))
             break;
         }
@@ -2541,7 +2781,7 @@ TSP_PUBLIC void TspPlayerPlayItemList(Tsp *tsp, TspItemList *tl, int index) {
         HttpPostOrPut("PUT", UrlWithDeviceId("https://api.spotify.com/v1/me/player/play", device_id),
                       access_token, data);
         for (int attempt = 0; attempt < 5; ++attempt) {
-          usleep(500000);
+          SleepForMicroseconds(500000);
           if (RefreshPlayerListFromQueue(tsp, access_token, list_uri, true))
             break;
         }
@@ -2718,7 +2958,7 @@ TSP_PUBLIC TspError TspFormatTimeMonotonous(Tsp *tsp, int i) {
 }
 
 TSP_PUBLIC TspError TspWaitForNetworkEvents(Tsp *tsp, int max_wait) {
-  usleep(max_wait * 1000);
+  SleepForMicroseconds(max_wait * 1000);
   return kTspErrorOk;
 }
 

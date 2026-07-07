@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 #include <thread>
-#if defined(OS_WIN)
-#include <wininet.h>
-#endif
+#include <mutex>
+
+#include <curl/curl.h>
 
 #include "tiny_spotify/tiny_spotify.h"
 
@@ -22,7 +22,6 @@ extern "C" {
 };
 #include "commands.h"
 #include "dialogs.h"
-#include "appkey.h"
 
 #ifndef MAX_PATH
 #define MAX_PATH 260
@@ -419,18 +418,12 @@ bool MainWindow::Load() {
   limits.track_player_size = 200;
   limits.compressed_buffer_size = 1024 * 2048;
 
-  // Decode the obfuscated appkey into a stack buffer at runtime.
-  unsigned char appkey_decoded[g_appkey_size];
-  DecodeAppkey(appkey_decoded, g_appkey_size);
-
+  static const unsigned char kNoAppkey[] = {0};
   tsp_ = TspCreate(machine_id,
                    MyCallback, this,
-                   appkey_decoded, g_appkey_size,
+                   kNoAppkey, 0,
                    "Spotiamp",
                    kTspCreate_DownloadRootlist, &limits, NULL);
-
-  // Zero the decoded buffer immediately — don't leave the key on the stack.
-  for (size_t i = 0; i < g_appkey_size; ++i) appkey_decoded[i] = 0;
 
   if (!tsp_) {
     return false;
@@ -2800,44 +2793,40 @@ void CoverArtWindow::OnClose() {
   main_window.SetCoverartVisible(false);
 }
 
-#if defined(OS_WIN)
-void DownloadFile(const char* url, std::vector<char>& buffer) {
-  HINTERNET hInternet = InternetOpenA("FileDownloader", INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
-  if (hInternet) {
-    HINTERNET hUrl = InternetOpenUrlA(hInternet, url, nullptr, 0, INTERNET_FLAG_RELOAD, 0);
-    if (hUrl) {
-      char tempBuffer[1024];
-      DWORD bytesRead;
-      while (InternetReadFile(hUrl, tempBuffer, sizeof(tempBuffer), &bytesRead) && bytesRead > 0) {
-        buffer.insert(buffer.end(), tempBuffer, tempBuffer + bytesRead);
-      }
-      std::cout << "File downloaded successfully." << std::endl;
-      InternetCloseHandle(hUrl);
-    } else {
-      std::cout << "Failed to open URL: " << url << std::endl;
-    }
-    InternetCloseHandle(hInternet);
-  } else {
-    std::cout << "Failed to initialize WinINet" << std::endl;
-  }
+static size_t CoverArtWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+  std::vector<char> *buffer = static_cast<std::vector<char> *>(userdata);
+  const size_t bytes = size * nmemb;
+  buffer->insert(buffer->end(), ptr, ptr + bytes);
+  return bytes;
 }
-#else
+
 void DownloadFile(const char* url, std::vector<char>& buffer) {
-  std::string cmd = std::string("curl -s -L \"") + url + "\"";
-  FILE* pipe = popen(cmd.c_str(), "r");
-  if (pipe) {
-    char tempBuffer[1024];
-    size_t bytesRead;
-    while ((bytesRead = fread(tempBuffer, 1, sizeof(tempBuffer), pipe)) > 0) {
-      buffer.insert(buffer.end(), tempBuffer, tempBuffer + bytesRead);
-    }
-    pclose(pipe);
-    std::cout << "File downloaded successfully via curl." << std::endl;
-  } else {
-    std::cout << "Failed to run curl for: " << url << std::endl;
+  static std::once_flag curl_init_once;
+  std::call_once(curl_init_once, []() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+  });
+
+  CURL *curl = curl_easy_init();
+  if (!curl) {
+    std::cout << "Failed to initialize libcurl" << std::endl;
+    return;
   }
+
+  curl_easy_setopt(curl, CURLOPT_URL, url);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "Spotiamp/" VERSION_STR);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CoverArtWriteCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+
+  CURLcode result = curl_easy_perform(curl);
+  if (result != CURLE_OK) {
+    std::cout << "Failed to download file: " << curl_easy_strerror(result) << std::endl;
+    buffer.clear();
+  }
+  curl_easy_cleanup(curl);
 }
-#endif
 
 void CoverArtWindow::SetImage(const char* image) {
 	if (image == image_) return;

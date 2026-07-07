@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 
+#if defined(_WIN32)
+#define popen _popen
+#define pclose _pclose
+#endif
+
 // ---------------------------------------------------------------------------
 // Helper: run a command and capture its stdout
 // ---------------------------------------------------------------------------

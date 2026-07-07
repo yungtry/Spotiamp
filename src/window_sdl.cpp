@@ -3,7 +3,6 @@
 #include "spotifyamp.h"
 #include "window.h"
 #include <stdio.h>
-#include "resource.h"
 #include "SDL.h"
 #include "SDL_surface.h"
 #include "SDL_clipboard.h"
