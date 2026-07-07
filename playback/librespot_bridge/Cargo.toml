@@ -1,0 +1,11 @@
+[package]
+name = "spotiamp_playback_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+librespot = { version = "0.8.0", default-features = false, features = ["native-tls"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "time"] }

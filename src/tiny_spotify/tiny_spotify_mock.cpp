@@ -1,4 +1,7 @@
 #include "tiny_spotify.h"
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+#include "playback_bridge.h"
+#endif
 #include <string>
 #include <curl/curl.h>
 #include <vector>
@@ -83,7 +86,9 @@ struct Tsp {
   long long player_position_updated_ms;
   long long local_control_until_ms;
   long long local_audio_hold_until_ms;
+  long long local_position_command_started_ms;
   int local_expected_position_ms;
+  bool local_bridge_transition_seen;
   bool local_desired_playing;
   bool local_stopped;
   bool is_playing;
@@ -102,7 +107,10 @@ struct Tsp {
   Tsp() : callback(NULL), callback_context(NULL), audio_callback(NULL), audio_context(NULL),
           connected(false), connection_error(kTspErrorOk), has_now_playing(false),
           player_position_ms(0), player_duration_ms(0), player_position_updated_ms(0),
-          local_control_until_ms(0), local_audio_hold_until_ms(0), local_expected_position_ms(-1), local_desired_playing(false), local_stopped(false), is_playing(false), volume(65535),
+          local_control_until_ms(0), local_audio_hold_until_ms(0),
+          local_position_command_started_ms(0), local_expected_position_ms(-1),
+          local_bridge_transition_seen(false), local_desired_playing(false),
+          local_stopped(false), is_playing(false), volume(65535),
           shuffle(false), repeat(false), player_list(NULL),
           audio_thread_running(false), poll_thread_running(false) {
     player_list = new TspItemList();
@@ -116,10 +124,10 @@ extern "C" void WavSetVolume(int vol);
 
 // Global variables
 static Tsp *g_global_tsp = NULL;
-#if defined(_WIN32)
+#if !defined(SPOTIAMP_WITH_RUST_BRIDGE) && defined(_WIN32)
 static PROCESS_INFORMATION g_librespot_process = {};
 static HANDLE g_librespot_stdout = INVALID_HANDLE_VALUE;
-#else
+#elif !defined(SPOTIAMP_WITH_RUST_BRIDGE)
 static pid_t g_librespot_pid = 0;
 static int g_librespot_stdout_fd = -1;
 #endif
@@ -196,9 +204,8 @@ static long long NowMonotonicMs() {
       std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-static bool PendingPositionCommandLocked(Tsp *tsp, long long now_ms) {
-  return tsp->local_control_until_ms > now_ms &&
-         tsp->local_expected_position_ms >= 0;
+static bool PendingPositionSyncLocked(Tsp *tsp) {
+  return tsp->local_expected_position_ms >= 0;
 }
 
 static bool CommandInFlightLocked(Tsp *tsp, long long now_ms) {
@@ -209,15 +216,37 @@ static bool AudioHoldLocked(Tsp *tsp, long long now_ms) {
   return tsp->local_audio_hold_until_ms > now_ms;
 }
 
+static bool AudioTransitionLocked(Tsp *tsp, long long now_ms) {
+  return AudioHoldLocked(tsp, now_ms) || PendingPositionSyncLocked(tsp);
+}
+
 static void SetAudioHoldLocked(Tsp *tsp, long long now_ms, int hold_ms) {
   tsp->local_audio_hold_until_ms = now_ms + hold_ms;
+}
+
+static void StartPositionTransitionLocked(Tsp *tsp, int expected_position_ms,
+                                          long long now_ms, int timeout_ms,
+                                          int hold_ms) {
+  tsp->local_expected_position_ms = expected_position_ms;
+  tsp->local_bridge_transition_seen = false;
+  tsp->local_position_command_started_ms = now_ms;
+  tsp->local_control_until_ms = now_ms + timeout_ms;
+  SetAudioHoldLocked(tsp, now_ms, hold_ms);
+}
+
+static void ClearPositionTransitionLocked(Tsp *tsp) {
+  tsp->local_expected_position_ms = -1;
+  tsp->local_bridge_transition_seen = false;
+  tsp->local_position_command_started_ms = 0;
+  tsp->local_control_until_ms = 0;
+  tsp->local_audio_hold_until_ms = 0;
 }
 
 static int CurrentPlayerPositionMsLocked(Tsp *tsp) {
   long long now_ms = NowMonotonicMs();
   int pos = tsp->player_position_ms;
   if (tsp->is_playing && tsp->player_position_updated_ms > 0 &&
-      !PendingPositionCommandLocked(tsp, now_ms)) {
+      !PendingPositionSyncLocked(tsp)) {
     pos += (int)(now_ms - tsp->player_position_updated_ms);
   }
   if (pos < 0) pos = 0;
@@ -225,6 +254,177 @@ static int CurrentPlayerPositionMsLocked(Tsp *tsp) {
     pos = tsp->player_duration_ms;
   return pos;
 }
+
+static int EndTransitionWindowMs(int duration_ms) {
+  int window_ms = duration_ms / 20;
+  if (window_ms < 3000) window_ms = 3000;
+  if (window_ms > 7000) window_ms = 7000;
+  return window_ms;
+}
+
+static bool NearTrackEndLocked(Tsp *tsp, int position_ms) {
+  if (!tsp || tsp->player_duration_ms <= 0)
+    return false;
+  return position_ms >= tsp->player_duration_ms - EndTransitionWindowMs(tsp->player_duration_ms);
+}
+
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+static void FlushRustBridgeAudio() {
+  if (sp_playback_bridge_is_running())
+    sp_playback_bridge_flush();
+}
+
+static bool BridgeLoadTrackUris(const std::vector<std::string> &uris, int index, int position_ms) {
+  if (!sp_playback_bridge_is_running() || uris.empty() || index < 0 ||
+      index >= (int)uris.size())
+    return false;
+  std::vector<const char*> raw_uris;
+  raw_uris.reserve(uris.size());
+  for (const auto &uri : uris)
+    raw_uris.push_back(uri.c_str());
+  return sp_playback_bridge_load_tracks(raw_uris.data(), (uintptr_t)raw_uris.size(),
+                                        (uint32_t)index, (uint32_t)position_ms, 1) == 0;
+}
+
+static bool BridgeLoadItemList(TspItemList *tl, int index, int position_ms) {
+  if (!tl || index < 0 || index >= (int)tl->items.size())
+    return false;
+  std::vector<std::string> uris;
+  int bridge_index = -1;
+  for (int i = 0; i < (int)tl->items.size(); ++i) {
+    TspItem *item = tl->items[i];
+    if (!item || !item->playable || item->uri.empty())
+      continue;
+    if (i == index)
+      bridge_index = (int)uris.size();
+    uris.push_back(item->uri);
+  }
+  return BridgeLoadTrackUris(uris, bridge_index, position_ms);
+}
+
+static bool BridgeLoadContext(const std::string &context_uri, const std::string &track_uri,
+                              int index, int position_ms) {
+  if (!sp_playback_bridge_is_running() || context_uri.empty())
+    return false;
+  const char *track = track_uri.empty() ? NULL : track_uri.c_str();
+  return sp_playback_bridge_load_context(context_uri.c_str(), track, (int32_t)index,
+                                         (uint32_t)position_ms, 1) == 0;
+}
+
+static bool ApplyRustBridgePlaybackState(Tsp *tsp) {
+  if (!tsp || !sp_playback_bridge_is_running())
+    return false;
+
+  SpPlaybackSnapshot snapshot = {};
+  if (sp_playback_bridge_snapshot(&snapshot) != 0)
+    return false;
+
+  int bridge_state = snapshot.state;
+  if (bridge_state <= 0)
+    return false;
+
+  int bridge_position_ms = (int)snapshot.position_ms;
+  if (bridge_position_ms < 0)
+    bridge_position_ms = 0;
+  bool bridge_has_buffered_audio = snapshot.buffered_ms > 0;
+
+  std::lock_guard<std::mutex> lock(tsp->mutex);
+  long long now_ms = NowMonotonicMs();
+  bool bridge_playing = bridge_state == 1;
+  bool bridge_loading = bridge_state == 3;
+  bool bridge_paused = bridge_state == 2;
+  bool bridge_stopped = bridge_state == 4;
+  bool command_in_flight = CommandInFlightLocked(tsp, now_ms);
+  bool pending_position = PendingPositionSyncLocked(tsp);
+
+  if (tsp->player_duration_ms > 0 && bridge_position_ms > tsp->player_duration_ms)
+    bridge_position_ms = tsp->player_duration_ms;
+
+  if (pending_position) {
+    if (bridge_loading) {
+      if (!tsp->local_bridge_transition_seen)
+        tsp->local_bridge_transition_seen = true;
+      tsp->player_position_ms = tsp->local_expected_position_ms;
+      tsp->player_position_updated_ms = 0;
+      if (AudioHoldLocked(tsp, now_ms) || !bridge_has_buffered_audio)
+        return false;
+      bridge_playing = true;
+      bridge_loading = false;
+    }
+    if (bridge_loading || AudioHoldLocked(tsp, now_ms))
+      return false;
+    bool close_to_expected = tsp->local_expected_position_ms > 1000 &&
+                             abs(bridge_position_ms - tsp->local_expected_position_ms) <= 1200;
+    bool transition_timed_out = tsp->local_position_command_started_ms > 0 &&
+                                now_ms - tsp->local_position_command_started_ms > 1200;
+    bool can_start_from_buffer = tsp->local_bridge_transition_seen && bridge_has_buffered_audio &&
+                                 !bridge_paused && !bridge_stopped;
+    bool can_start_from_position = tsp->local_bridge_transition_seen &&
+                                   close_to_expected &&
+                                   !bridge_paused && !bridge_stopped;
+    bool can_start_after_timeout = transition_timed_out && bridge_has_buffered_audio &&
+                                   !bridge_paused && !bridge_stopped;
+    bool can_accept_bridge_playing = bridge_playing &&
+                                     (tsp->local_bridge_transition_seen ||
+                                      close_to_expected ||
+                                      transition_timed_out);
+    if (!can_accept_bridge_playing && !can_start_from_buffer &&
+        !can_start_from_position && !can_start_after_timeout)
+      return false;
+    if (!bridge_playing) {
+      bridge_playing = true;
+      bridge_loading = false;
+    }
+  }
+
+  if (!pending_position && tsp->local_desired_playing && tsp->has_now_playing &&
+      !tsp->repeat && bridge_position_ms <= 2500 &&
+      (bridge_loading || bridge_playing) &&
+      NearTrackEndLocked(tsp, CurrentPlayerPositionMsLocked(tsp))) {
+    return false;
+  }
+
+  if (tsp->local_stopped && !bridge_stopped)
+    return false;
+
+  if (!pending_position && !tsp->local_desired_playing && bridge_playing)
+    return false;
+
+  if (bridge_loading) {
+    tsp->player_position_ms = bridge_position_ms;
+    tsp->player_position_updated_ms = 0;
+    if (!tsp->local_desired_playing)
+      tsp->is_playing = false;
+    return true;
+  }
+
+  if (bridge_paused && command_in_flight && tsp->local_desired_playing)
+    return false;
+
+  if (bridge_playing || bridge_paused) {
+    tsp->player_position_ms = pending_position && bridge_playing
+                                  ? tsp->local_expected_position_ms
+                                  : bridge_position_ms;
+    tsp->player_position_updated_ms = 0;
+    tsp->is_playing = bridge_playing;
+    if (bridge_playing) {
+      tsp->local_stopped = false;
+      ClearPositionTransitionLocked(tsp);
+    }
+    return true;
+  }
+
+  if (bridge_stopped) {
+    if (tsp->local_desired_playing && tsp->has_now_playing)
+      return false;
+    tsp->is_playing = false;
+    tsp->player_position_updated_ms = now_ms;
+    return true;
+  }
+
+  return false;
+}
+#endif
 
 static std::string GetAccessToken(Tsp *tsp) {
   if (!tsp) return "";
@@ -281,11 +481,9 @@ static void ApplyNowPlayingFromItemLocked(Tsp *tsp, TspItem *item, int index) {
   tsp->player_position_updated_ms = NowMonotonicMs();
   tsp->has_now_playing = true;
   tsp->local_desired_playing = true;
-  tsp->local_expected_position_ms = 0;
   tsp->local_stopped = false;
   long long now_ms = NowMonotonicMs();
-  tsp->local_control_until_ms = now_ms + 5000;
-  SetAudioHoldLocked(tsp, now_ms, 250);
+  StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
   if (tsp->player_list) {
     tsp->player_list->now_playing_index = index;
   }
@@ -378,6 +576,9 @@ static bool SetPendingNowPlayingIndex(Tsp *tsp, int index) {
     // once the API confirms playback started.
     tsp->is_playing = true;
   }
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  FlushRustBridgeAudio();
+#endif
   DispatchPlayerCallback(tsp, kTspCallbackEvent_NowPlayingChanged);
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
   return true;
@@ -1580,8 +1781,41 @@ static std::string GetSpotiampDeviceId(Tsp *tsp) {
   return GetSpotiampDeviceIdFromToken(GetAccessToken(tsp));
 }
 
-// Subprocess control
-#if defined(_WIN32)
+// Playback bridge / subprocess control
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
+  (void)user;
+  (void)pass;
+  int rc = sp_playback_bridge_start(token, NULL);
+  if (rc != 0) {
+    std::cout << "[DEBUG] Rust playback bridge start failed: " << rc << std::endl;
+  }
+}
+
+static void KillLibrespot() {
+  sp_playback_bridge_stop();
+}
+
+static bool LibrespotOutputAvailable() {
+  return sp_playback_bridge_is_running() != 0;
+}
+
+static int ReadLibrespotOutput(char *buffer, int size) {
+  intptr_t bytes_read = sp_playback_bridge_read(buffer, (uintptr_t)size);
+  if (bytes_read <= 0)
+    return -1;
+  return (int)bytes_read;
+}
+
+static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buffer_size) {
+  (void)buffer;
+  (void)buffer_size;
+  *residual_count = 0;
+  // The Rust bridge position is advanced by reads because reads represent PCM
+  // handed to the audio device. During a local transition hold we intentionally
+  // do not drain here, otherwise discarded audio would move the visible clock.
+}
+#elif defined(_WIN32)
 static std::string QuoteWindowsArg(const std::string &arg) {
   std::string out = "\"";
   for (char c : arg) {
@@ -1845,21 +2079,35 @@ static void AudioThreadProc(Tsp *tsp) {
   format.replaygain_album = 0.0f;
 
   while (tsp->audio_thread_running) {
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    ApplyRustBridgePlaybackState(tsp);
+#endif
     bool is_playing = false;
-    bool hold_audio = false;
+    bool transition_audio = false;
+    bool desired_playing = false;
+    bool locally_stopped = false;
     {
       std::lock_guard<std::mutex> lock(tsp->mutex);
       is_playing = tsp->is_playing;
+      desired_playing = tsp->local_desired_playing;
+      locally_stopped = tsp->local_stopped;
       long long now_ms = NowMonotonicMs();
-      hold_audio = AudioHoldLocked(tsp, now_ms);
+      transition_audio = AudioTransitionLocked(tsp, now_ms);
     }
-    if (!is_playing || hold_audio) {
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    if (desired_playing && !locally_stopped && !transition_audio) {
+      SpPlaybackSnapshot snapshot = {};
+      if (sp_playback_bridge_snapshot(&snapshot) == 0 &&
+          (snapshot.state == 1 || snapshot.buffered_ms > 0)) {
+        is_playing = true;
+      }
+    }
+#endif
+    if (!is_playing || transition_audio) {
       if (!output_paused) {
         DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
         output_paused = true;
       }
-      if (hold_audio)
-        DrainLibrespotPipeAligned(buffer, &residual_count, chunk_size);
       SleepForMicroseconds(10000);
       continue;
     } else if (output_paused) {
@@ -1880,6 +2128,9 @@ static void AudioThreadProc(Tsp *tsp) {
       SleepForMicroseconds(10000);
       continue;
     }
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    ApplyRustBridgePlaybackState(tsp);
+#endif
 
     int total_bytes = residual_count + bytes_read;
     int process_bytes = total_bytes & ~3; // Frame-align to 4 bytes
@@ -1911,6 +2162,9 @@ static void AudioThreadProc(Tsp *tsp) {
 
 static void PollThreadProc(Tsp *tsp) {
   while (tsp->poll_thread_running) {
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    ApplyRustBridgePlaybackState(tsp);
+#endif
     std::string access_token;
     {
       std::lock_guard<std::mutex> lock(tsp->mutex);
@@ -1970,29 +2224,44 @@ static void PollThreadProc(Tsp *tsp) {
         
         std::lock_guard<std::mutex> lock(tsp->mutex);
         long long now_ms = NowMonotonicMs();
+        int local_predicted_pos = CurrentPlayerPositionMsLocked(tsp);
         bool command_in_flight = tsp->local_control_until_ms > now_ms;
         bool suppress_play_state = command_in_flight && tsp->local_desired_playing != is_p;
         bool suppress_stopped_metadata = tsp->local_stopped && !is_p;
-        bool suppress_progress = command_in_flight &&
-                                 tsp->local_expected_position_ms >= 0 &&
-                                 abs(pos - tsp->local_expected_position_ms) > 2500;
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+        bool bridge_owns_position = sp_playback_bridge_is_running() != 0;
+#else
+        bool bridge_owns_position = false;
+#endif
+        bool suppress_progress = PendingPositionSyncLocked(tsp) &&
+                                 abs(pos - local_predicted_pos) > 1500;
+        bool stale_end_restart_update = has_valid_item && has_numeric_progress &&
+                                        old_is_playing && is_p && pos <= 2500 &&
+                                        tsp->has_now_playing &&
+                                        tsp->now_playing_item.uri == track_uri &&
+                                        !tsp->repeat &&
+                                        NearTrackEndLocked(tsp, old_pos);
         bool suppress_metadata = suppress_stopped_metadata ||
+                                 stale_end_restart_update ||
                                  (command_in_flight &&
                                   ((tsp->has_now_playing && tsp->now_playing_item.uri != track_uri) ||
-                                   tsp->local_desired_playing != is_p ||
-                                   suppress_progress));
+                                   tsp->local_desired_playing != is_p));
+        bool suppress_position = bridge_owns_position || suppress_progress ||
+                                 suppress_play_state || suppress_metadata;
 
         if (has_valid_item && has_numeric_progress && !stale_idle_update &&
-            !suppress_play_state && !suppress_metadata) {
+            !stale_end_restart_update && !suppress_position) {
           tsp->is_playing = is_p;
           tsp->player_position_ms = pos;
           tsp->player_position_updated_ms = now_ms;
-          tsp->local_control_until_ms = 0;
-          tsp->local_audio_hold_until_ms = 0;
-          tsp->local_expected_position_ms = -1;
+          ClearPositionTransitionLocked(tsp);
           if (is_p)
             tsp->local_stopped = false;
         } else if (stale_idle_update) {
+        } else if (stale_end_restart_update) {
+          play_state_suppressed = true;
+        } else if (suppress_position) {
+          play_state_suppressed = true;
         } else if (suppress_stopped_metadata) {
           play_state_suppressed = true;
         } else if (suppress_metadata) {
@@ -2036,6 +2305,10 @@ static void PollThreadProc(Tsp *tsp) {
       }
     } else {
     }
+
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    ApplyRustBridgePlaybackState(tsp);
+#endif
     
     int sleep_steps = 20;
     {
@@ -2596,7 +2869,14 @@ TSP_PUBLIC int TspPlayerGetVolume(Tsp *tsp) {
 }
 
 TSP_PUBLIC TspBool TspPlayerIsLoading(Tsp *tsp) {
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  (void)tsp;
+  SpPlaybackSnapshot snapshot = {};
+  return sp_playback_bridge_snapshot(&snapshot) == 0 && snapshot.loading;
+#else
+  (void)tsp;
   return 0;
+#endif
 }
 
 TSP_PUBLIC void TspPlayerNextTrack(Tsp *tsp) {
@@ -2610,9 +2890,18 @@ TSP_PUBLIC void TspPlayerNextTrack(Tsp *tsp) {
   }
 
   std::string access_token = GetAccessToken(tsp);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    if (tsp && tsp->player_list && next_index >= 0 &&
+        BridgeLoadItemList(tsp->player_list, next_index, 0))
+      return;
+    if (sp_playback_bridge_next() == 0)
+      return;
+  }
+#endif
   if (!access_token.empty()) {
     if (!next_uri.empty()) {
-      std::string data = "{ \"uris\": [ \"" + next_uri + "\" ] }";
+      std::string data = "{ \"uris\": [ \"" + next_uri + "\" ], \"position_ms\": 0 }";
       HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
     } else {
       HttpPostOrPutDeviceAsync("POST", "https://api.spotify.com/v1/me/player/next", access_token);
@@ -2628,12 +2917,16 @@ TSP_PUBLIC void TspPlayerPause(Tsp *tsp) {
     tsp->player_position_updated_ms = NowMonotonicMs();
     tsp->is_playing = false;
     tsp->local_desired_playing = false;
-    tsp->local_expected_position_ms = -1;
+    ClearPositionTransitionLocked(tsp);
     tsp->local_stopped = false;
-    tsp->local_audio_hold_until_ms = 0;
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    sp_playback_bridge_pause();
+  } else
+#endif
   if (!access_token.empty())
     HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/pause", access_token);
   DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
@@ -2645,12 +2938,16 @@ TSP_PUBLIC void TspPlayerPlay(Tsp *tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_updated_ms = NowMonotonicMs();
     tsp->local_desired_playing = true;
-    tsp->local_expected_position_ms = -1;
+    ClearPositionTransitionLocked(tsp);
     tsp->local_stopped = false;
-    tsp->local_audio_hold_until_ms = 0;
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_FlushBuffer);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    sp_playback_bridge_play();
+  } else
+#endif
   if (!access_token.empty()) {
     std::thread([access_token]() {
       std::string device_id = GetSpotiampDeviceIdFromToken(access_token);
@@ -2670,12 +2967,10 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
       tsp->player_position_ms = 0;
       tsp->player_position_updated_ms = NowMonotonicMs();
       tsp->local_desired_playing = true;
-      tsp->local_expected_position_ms = 0;
       tsp->local_stopped = false;
       tsp->queue_sync_context_uri.clear();
       long long now_ms = NowMonotonicMs();
-      tsp->local_control_until_ms = now_ms + 5000;
-      SetAudioHoldLocked(tsp, now_ms, 250);
+      StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
     }
     DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
     DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
@@ -2703,6 +2998,11 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
           break;
       }
       data += " ], \"position_ms\": 0 }";
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+      if (sp_playback_bridge_is_running()) {
+        BridgeLoadItemList(tsp->player_list, 0, 0);
+      } else
+#endif
       if (added > 0)
         HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
     }).detach();
@@ -2710,7 +3010,14 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
   }
 
   bool refresh_queue = false;
-  if (!access_token.empty()) {
+  bool handled_by_bridge = false;
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    std::string track = track_uri ? track_uri : "";
+    handled_by_bridge = BridgeLoadContext(context, track, index, 0);
+  }
+#endif
+  if (!handled_by_bridge && !access_token.empty()) {
     std::string track = track_uri ? track_uri : "";
     std::string data = "{ \"context_uri\": \"" + context + "\"";
     if (!track.empty()) {
@@ -2718,6 +3025,8 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
     } else if (index >= 0) {
       data += ", \"offset\": { \"position\": " + std::to_string(index) + " }";
     }
+    if (!track.empty() || index >= 0)
+      data += ", \"position_ms\": 0";
     data += " }";
     refresh_queue = track.empty() && index < 0 && context.rfind("spotify:playlist:", 0) == 0;
     if (refresh_queue) {
@@ -2737,21 +3046,19 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
   }
   if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
-    tsp->is_playing = false;
+    tsp->is_playing = true;
     tsp->player_position_ms = 0;
     tsp->player_position_updated_ms = NowMonotonicMs();
     tsp->local_desired_playing = true;
-    tsp->local_expected_position_ms = 0;
     tsp->local_stopped = false;
     tsp->queue_sync_context_uri = refresh_queue ? context : "";
     {
       long long now_ms = NowMonotonicMs();
-      tsp->local_control_until_ms = now_ms + 5000;
-      SetAudioHoldLocked(tsp, now_ms, 250);
+      StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
     }
   }
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
-  DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
+  DispatchPlayerCallback(tsp, kTspCallbackEvent_Resume);
   return kTspErrorOk;
 }
 
@@ -2769,6 +3076,10 @@ TSP_PUBLIC void TspPlayerPlayItemList(Tsp *tsp, TspItemList *tl, int index) {
   tsp->queue_sync_context_uri = queue_synced_context ? list_uri : "";
   std::string item_uri = item->uri;
   SetPendingNowPlayingIndex(tsp, index);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running() && BridgeLoadItemList(tsp->player_list, index, 0))
+    return;
+#endif
   
   std::string access_token = GetAccessToken(tsp);
   if (!access_token.empty()) {
@@ -2804,9 +3115,18 @@ TSP_PUBLIC void TspPlayerPrevTrack(Tsp *tsp) {
   }
 
   std::string access_token = GetAccessToken(tsp);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    if (tsp && tsp->player_list && prev_index >= 0 &&
+        BridgeLoadItemList(tsp->player_list, prev_index, 0))
+      return;
+    if (sp_playback_bridge_prev() == 0)
+      return;
+  }
+#endif
   if (!access_token.empty()) {
     if (!prev_uri.empty()) {
-      std::string data = "{ \"uris\": [ \"" + prev_uri + "\" ] }";
+      std::string data = "{ \"uris\": [ \"" + prev_uri + "\" ], \"position_ms\": 0 }";
       HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
     } else {
       HttpPostOrPutDeviceAsync("POST", "https://api.spotify.com/v1/me/player/previous", access_token);
@@ -2822,19 +3142,21 @@ TSP_PUBLIC TspError TspPlayerSeek(Tsp *tsp, int position_ms) {
       std::lock_guard<std::mutex> lock(tsp->mutex);
       if (tsp->player_duration_ms > 0 && position_ms > tsp->player_duration_ms)
         position_ms = tsp->player_duration_ms;
-      resume_after_seek = tsp->is_playing;
+      resume_after_seek = tsp->is_playing || tsp->local_desired_playing;
       tsp->player_position_ms = position_ms;
       tsp->player_position_updated_ms = NowMonotonicMs();
       tsp->is_playing = resume_after_seek;
       tsp->local_desired_playing = resume_after_seek;
-      tsp->local_expected_position_ms = position_ms;
       tsp->local_stopped = false;
       {
         long long now_ms = NowMonotonicMs();
-        tsp->local_control_until_ms = now_ms + 7000;
-        SetAudioHoldLocked(tsp, now_ms, resume_after_seek ? 150 : 0);
+        StartPositionTransitionLocked(tsp, position_ms, now_ms, 7000,
+                                      resume_after_seek ? 40 : 0);
       }
     }
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    FlushRustBridgeAudio();
+#endif
     if (resume_after_seek) {
       DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
     } else {
@@ -2842,6 +3164,12 @@ TSP_PUBLIC TspError TspPlayerSeek(Tsp *tsp, int position_ms) {
       DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
     }
     std::string access_token = GetAccessToken(tsp);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    if (sp_playback_bridge_is_running()) {
+      sp_playback_bridge_seek((uint32_t)position_ms);
+      return kTspErrorOk;
+    }
+#endif
     if (!access_token.empty()) {
       std::string url = "https://api.spotify.com/v1/me/player/seek?position_ms=" + std::to_string(position_ms);
       HttpPostOrPutDeviceAsync("PUT", url, access_token);
@@ -2857,7 +3185,12 @@ TSP_PUBLIC void TspPlayerSetEqualizer(Tsp *tsp, int enable, float pregain, const
 }
 
 TSP_PUBLIC void TspPlayerSetNowPlayingIndex(Tsp *tsp, int track) {
-  if (!SetNowPlayingIndex(tsp, track) && tsp) {
+  if (SetNowPlayingIndex(tsp, track)) {
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    if (sp_playback_bridge_is_running() && tsp && tsp->player_list)
+      BridgeLoadItemList(tsp->player_list, track, 0);
+#endif
+  } else if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_ms = 0;
     tsp->player_position_updated_ms = NowMonotonicMs();
@@ -2871,6 +3204,13 @@ TSP_PUBLIC TspError TspPlayerSetRepeat(Tsp *tsp, int repeat) {
       tsp->repeat = repeat != 0;
     }
     std::string access_token = GetAccessToken(tsp);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    if (sp_playback_bridge_is_running()) {
+      sp_playback_bridge_set_repeat(repeat ? 1 : 0);
+      DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
+      return kTspErrorOk;
+    }
+#endif
     if (!access_token.empty()) {
       std::string url = "https://api.spotify.com/v1/me/player/repeat?state=" + std::string(repeat ? "track" : "off");
       HttpPostOrPutDeviceAsync("PUT", url, access_token);
@@ -2887,6 +3227,13 @@ TSP_PUBLIC TspError TspPlayerSetShuffle(Tsp *tsp, int shuffle) {
       tsp->shuffle = shuffle != 0;
     }
     std::string access_token = GetAccessToken(tsp);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+    if (sp_playback_bridge_is_running()) {
+      sp_playback_bridge_set_shuffle(shuffle);
+      DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
+      return kTspErrorOk;
+    }
+#endif
     if (!access_token.empty()) {
       std::string url = "https://api.spotify.com/v1/me/player/shuffle?state=" + std::string(shuffle ? "true" : "false");
       HttpPostOrPutDeviceAsync("PUT", url, access_token);
@@ -2919,12 +3266,16 @@ TSP_PUBLIC void TspPlayerStop(Tsp *tsp) {
     tsp->is_playing = false;
     tsp->has_now_playing = false;
     tsp->local_desired_playing = false;
-    tsp->local_expected_position_ms = -1;
+    ClearPositionTransitionLocked(tsp);
     tsp->local_stopped = true;
-    tsp->local_audio_hold_until_ms = 0;
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  if (sp_playback_bridge_is_running()) {
+    sp_playback_bridge_stop_playback();
+  } else
+#endif
   if (!access_token.empty())
     HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/pause", access_token);
   DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);

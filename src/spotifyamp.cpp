@@ -22,6 +22,9 @@ extern "C" {
 };
 #include "commands.h"
 #include "dialogs.h"
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+#include "playback_bridge.h"
+#endif
 
 #ifndef MAX_PATH
 #define MAX_PATH 260
@@ -412,6 +415,13 @@ bool MainWindow::Load() {
 #else
   start_ticks = GetTickCount();
   TspSetDebugLogger(&TspDprintf);
+#endif
+
+#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+  std::cout << "[DEBUG] Rust playback bridge "
+            << sp_playback_bridge_version_string()
+            << " ABI " << sp_playback_bridge_abi_version()
+            << std::endl;
 #endif
 
   TspMemoryLimits limits = {0};
