@@ -5,8 +5,6 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(SPOTIAMP_ENABLE_RUST_BRIDGE "Build and link the experimental Rust playback bridge" ON)
-option(SPOTIAMP_REQUIRE_RUST_BRIDGE "Fail configure when the Rust playback bridge cannot be built" OFF)
 set(SPOTIAMP_CARGO_TARGET "" CACHE STRING "Optional Cargo target triple for the Rust playback bridge")
 
 # ---------------------------------------------------------------------------
@@ -131,76 +129,71 @@ add_executable(spotiamp ${SPOTIAMP_SRCS})
 
 target_compile_definitions(spotiamp PRIVATE WITH_SDL)
 
-if(SPOTIAMP_ENABLE_RUST_BRIDGE)
-    find_program(CARGO_EXECUTABLE cargo)
-    if(CARGO_EXECUTABLE)
-        set(RUST_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/playback/librespot_bridge")
-        set(RUST_BRIDGE_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            set(RUST_BRIDGE_PROFILE "debug")
-            set(RUST_BRIDGE_PROFILE_ARGS "")
-        else()
-            set(RUST_BRIDGE_PROFILE "release")
-            set(RUST_BRIDGE_PROFILE_ARGS "--release")
-        endif()
+find_program(CARGO_EXECUTABLE cargo)
+if(NOT CARGO_EXECUTABLE)
+    message(FATAL_ERROR "Cargo is required to build the Rust playback bridge")
+endif()
+set(RUST_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/playback/librespot_bridge")
+set(RUST_BRIDGE_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(RUST_BRIDGE_PROFILE "debug")
+    set(RUST_BRIDGE_PROFILE_ARGS "")
+else()
+    set(RUST_BRIDGE_PROFILE "release")
+    set(RUST_BRIDGE_PROFILE_ARGS "--release")
+endif()
 
-        set(RUST_BRIDGE_TARGET_ARGS "")
-        set(RUST_BRIDGE_TARGET_PATH "")
-        if(SPOTIAMP_CARGO_TARGET)
-            set(RUST_BRIDGE_TARGET_ARGS "--target" "${SPOTIAMP_CARGO_TARGET}")
-            set(RUST_BRIDGE_TARGET_PATH "${SPOTIAMP_CARGO_TARGET}/")
-        endif()
+set(RUST_BRIDGE_TARGET_ARGS "")
+set(RUST_BRIDGE_TARGET_PATH "")
+if(SPOTIAMP_CARGO_TARGET)
+    set(RUST_BRIDGE_TARGET_ARGS "--target" "${SPOTIAMP_CARGO_TARGET}")
+    set(RUST_BRIDGE_TARGET_PATH "${SPOTIAMP_CARGO_TARGET}/")
+endif()
 
-        if(WIN32 AND MSVC)
-            set(RUST_BRIDGE_LIB_NAME "spotiamp_playback_bridge.lib")
-        else()
-            set(RUST_BRIDGE_LIB_NAME "libspotiamp_playback_bridge.a")
-        endif()
-        set(RUST_BRIDGE_LIB
-            "${RUST_BRIDGE_TARGET_DIR}/${RUST_BRIDGE_TARGET_PATH}${RUST_BRIDGE_PROFILE}/${RUST_BRIDGE_LIB_NAME}")
+if(WIN32 AND MSVC)
+    set(RUST_BRIDGE_LIB_NAME "spotiamp_playback_bridge.lib")
+else()
+    set(RUST_BRIDGE_LIB_NAME "libspotiamp_playback_bridge.a")
+endif()
+set(RUST_BRIDGE_LIB
+    "${RUST_BRIDGE_TARGET_DIR}/${RUST_BRIDGE_TARGET_PATH}${RUST_BRIDGE_PROFILE}/${RUST_BRIDGE_LIB_NAME}")
 
-        add_custom_command(
-            OUTPUT "${RUST_BRIDGE_LIB}"
-            COMMAND ${CMAKE_COMMAND} -E env
-                    "CARGO_TARGET_DIR=${RUST_BRIDGE_TARGET_DIR}"
-                    "${CARGO_EXECUTABLE}" build
-                    --manifest-path "${RUST_BRIDGE_DIR}/Cargo.toml"
-                    ${RUST_BRIDGE_PROFILE_ARGS}
-                    ${RUST_BRIDGE_TARGET_ARGS}
-            DEPENDS
-                    "${RUST_BRIDGE_DIR}/Cargo.toml"
-                    "${RUST_BRIDGE_DIR}/Cargo.lock"
-                    "${RUST_BRIDGE_DIR}/src/lib.rs"
-            WORKING_DIRECTORY "${RUST_BRIDGE_DIR}"
-            COMMENT "Building Rust playback bridge"
-            VERBATIM
-        )
-        add_custom_target(spotiamp_playback_bridge DEPENDS "${RUST_BRIDGE_LIB}")
+add_custom_command(
+    OUTPUT "${RUST_BRIDGE_LIB}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${RUST_BRIDGE_TARGET_DIR}"
+            "${CARGO_EXECUTABLE}" build
+            --manifest-path "${RUST_BRIDGE_DIR}/Cargo.toml"
+            ${RUST_BRIDGE_PROFILE_ARGS}
+            ${RUST_BRIDGE_TARGET_ARGS}
+    DEPENDS
+            "${RUST_BRIDGE_DIR}/Cargo.toml"
+            "${RUST_BRIDGE_DIR}/Cargo.lock"
+            "${RUST_BRIDGE_DIR}/src/lib.rs"
+    WORKING_DIRECTORY "${RUST_BRIDGE_DIR}"
+    COMMENT "Building Rust playback bridge"
+    VERBATIM
+)
+add_custom_target(spotiamp_playback_bridge DEPENDS "${RUST_BRIDGE_LIB}")
 
-        add_library(spotiamp_playback_bridge_static STATIC IMPORTED GLOBAL)
-        set_target_properties(spotiamp_playback_bridge_static PROPERTIES
-            IMPORTED_LOCATION "${RUST_BRIDGE_LIB}")
-        add_dependencies(spotiamp_playback_bridge_static spotiamp_playback_bridge)
+add_library(spotiamp_playback_bridge_static STATIC IMPORTED GLOBAL)
+set_target_properties(spotiamp_playback_bridge_static PROPERTIES
+    IMPORTED_LOCATION "${RUST_BRIDGE_LIB}")
+add_dependencies(spotiamp_playback_bridge_static spotiamp_playback_bridge)
 
-        target_compile_definitions(spotiamp PRIVATE SPOTIAMP_WITH_RUST_BRIDGE)
-        target_link_libraries(spotiamp PRIVATE spotiamp_playback_bridge_static)
-        if(APPLE)
-            find_library(SECURITY_FRAMEWORK Security REQUIRED)
-            find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
-            find_library(SYSTEMCONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
-            find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
-            target_link_libraries(spotiamp PRIVATE
-                ${SECURITY_FRAMEWORK}
-                ${COREFOUNDATION_FRAMEWORK}
-                ${SYSTEMCONFIGURATION_FRAMEWORK}
-                ${IOKIT_FRAMEWORK}
-            )
-        endif()
-    elseif(SPOTIAMP_REQUIRE_RUST_BRIDGE)
-        message(FATAL_ERROR "Cargo was not found, but SPOTIAMP_REQUIRE_RUST_BRIDGE is ON")
-    else()
-        message(WARNING "Cargo was not found; Rust playback bridge will not be built")
-    endif()
+target_compile_definitions(spotiamp PRIVATE SPOTIAMP_WITH_RUST_BRIDGE)
+target_link_libraries(spotiamp PRIVATE spotiamp_playback_bridge_static)
+if(APPLE)
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(SYSTEMCONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
+    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+    target_link_libraries(spotiamp PRIVATE
+        ${SECURITY_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
+        ${SYSTEMCONFIGURATION_FRAMEWORK}
+        ${IOKIT_FRAMEWORK}
+    )
 endif()
 
 target_include_directories(spotiamp PRIVATE

@@ -1,7 +1,5 @@
 #include "tiny_spotify.h"
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
 #include "playback_bridge.h"
-#endif
 #include <string>
 #include <curl/curl.h>
 #include <vector>
@@ -21,16 +19,10 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <io.h>
 #define popen _popen
 #define pclose _pclose
-typedef int ssize_t;
 #else
 #include <unistd.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -97,7 +89,6 @@ struct Tsp {
   bool repeat;
   
   TspItemList *player_list;
-  std::string queue_sync_context_uri;
   
   std::thread audio_thread;
   std::atomic<bool> audio_thread_running;
@@ -124,16 +115,7 @@ extern "C" void WavSetVolume(int vol);
 
 // Global variables
 static Tsp *g_global_tsp = NULL;
-#if !defined(SPOTIAMP_WITH_RUST_BRIDGE) && defined(_WIN32)
-static PROCESS_INFORMATION g_librespot_process = {};
-static HANDLE g_librespot_stdout = INVALID_HANDLE_VALUE;
-#elif !defined(SPOTIAMP_WITH_RUST_BRIDGE)
-static pid_t g_librespot_pid = 0;
-static int g_librespot_stdout_fd = -1;
-#endif
 static std::vector<std::string> g_radio_seed_uris;
-
-static std::string GetSpotiampDeviceIdFromToken(const std::string &access_token);
 
 static void SleepForMicroseconds(int usec) {
 #if defined(_WIN32)
@@ -268,7 +250,6 @@ static bool NearTrackEndLocked(Tsp *tsp, int position_ms) {
   return position_ms >= tsp->player_duration_ms - EndTransitionWindowMs(tsp->player_duration_ms);
 }
 
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
 static void FlushRustBridgeAudio() {
   if (sp_playback_bridge_is_running())
     sp_playback_bridge_flush();
@@ -424,7 +405,6 @@ static bool ApplyRustBridgePlaybackState(Tsp *tsp) {
 
   return false;
 }
-#endif
 
 static std::string GetAccessToken(Tsp *tsp) {
   if (!tsp) return "";
@@ -509,24 +489,6 @@ static void ClearItemList(TspItemList *tl) {
   tl->items.clear();
 }
 
-static void DeleteItemVector(std::vector<TspItem*> *items) {
-  if (!items) return;
-  for (auto *item : *items)
-    delete item;
-  items->clear();
-}
-
-static int FindTrackIndexByUri(TspItemList *tl, const std::string &uri) {
-  if (!tl || uri.empty())
-    return -1;
-  for (int i = 0; i < (int)tl->items.size(); ++i) {
-    TspItem *item = tl->items[i];
-    if (item && item->uri == uri)
-      return i;
-  }
-  return -1;
-}
-
 static TspItem *DuplicateItem(TspItem *src_item) {
   if (!src_item) return NULL;
   TspItem *item = new TspItem();
@@ -572,13 +534,10 @@ static bool SetPendingNowPlayingIndex(Tsp *tsp, int index) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     ApplyNowPlayingFromItemLocked(tsp, item, index);
     // Keep is_playing = true so the UI doesn't flash to paused/0:00 while
-    // the Spotify API call is in flight. The poll thread will update state
-    // once the API confirms playback started.
+    // the bridge command is in flight.
     tsp->is_playing = true;
   }
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
   FlushRustBridgeAudio();
-#endif
   DispatchPlayerCallback(tsp, kTspCallbackEvent_NowPlayingChanged);
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
   return true;
@@ -623,11 +582,6 @@ static int PickNextIndex(Tsp *tsp, int direction) {
       return idx;
   }
   return -1;
-}
-
-static std::string UrlWithDeviceId(const std::string &url, const std::string &device_id) {
-  if (device_id.empty()) return url;
-  return url + (url.find('?') == std::string::npos ? "?device_id=" : "&device_id=") + device_id;
 }
 
 // Spotify API credentials — loaded from obfuscated build-time generated header.
@@ -724,23 +678,6 @@ static std::string HttpGet(const std::string &url, const std::string &token) {
 
 static long LastHttpStatus() {
   return g_last_http_status;
-}
-
-static std::string HttpPostOrPut(const std::string &method, const std::string &url, const std::string &token, const std::string &data = "") {
-  return PerformHttpRequest(method, url, token, data);
-}
-
-static void HttpPostOrPutAsync(const std::string &method, const std::string &url, const std::string &token, const std::string &data = "") {
-  std::thread([method, url, token, data]() {
-    HttpPostOrPut(method, url, token, data);
-  }).detach();
-}
-
-static void HttpPostOrPutDeviceAsync(const std::string &method, const std::string &url, const std::string &token, const std::string &data = "") {
-  std::thread([method, url, token, data]() {
-    std::string device_id = GetSpotiampDeviceIdFromToken(token);
-    HttpPostOrPut(method, UrlWithDeviceId(url, device_id), token, data);
-  }).detach();
 }
 
 // Base64 helper
@@ -1283,80 +1220,6 @@ static void AppendPlaylistTracks(std::vector<TspItem*> *tracks, Tsp *tsp, const 
             << ((int)tracks->size() - start_count) << " playable tracks" << std::endl;
 }
 
-static bool RefreshPlayerListFromQueue(Tsp *tsp, const std::string &access_token,
-                                       const std::string &context_uri,
-                                       bool append_only = false) {
-  if (!tsp || access_token.empty())
-    return false;
-
-  std::string response = HttpGet("https://api.spotify.com/v1/me/player/queue", access_token);
-  if (response.find("\"error\"") != std::string::npos) {
-    std::cout << "[DEBUG] RefreshPlayerListFromQueue: status " << LastHttpStatus()
-              << ": " << response << std::endl;
-    return false;
-  }
-
-  std::vector<TspItem*> tracks;
-  std::string current_json = JsonExtractObjectShallow(response, "currently_playing");
-  if (!current_json.empty()) {
-    TspItem *item = CreateTrackItemFromJson(current_json);
-    if (item)
-      tracks.push_back(item);
-  }
-  AppendTrackObjects(&tracks, JsonExtractArray(response, "queue"));
-  if (tracks.empty()) {
-    std::cout << "[DEBUG] RefreshPlayerListFromQueue: queue returned no playable tracks" << std::endl;
-    return false;
-  }
-
-  int added = 0;
-  bool index_changed = false;
-  if (!append_only || tsp->player_list->items.empty() ||
-      tsp->player_list->uri != context_uri) {
-    ClearItemList(tsp->player_list);
-    tsp->player_list->uri = context_uri;
-    tsp->player_list->items = tracks;
-    tsp->player_list->now_playing_index = 0;
-    added = (int)tracks.size();
-    tracks.clear();
-  } else {
-    for (int i = 0; i < (int)tracks.size(); ++i) {
-      TspItem *item = tracks[i];
-      if (!item)
-        continue;
-      int existing_index = FindTrackIndexByUri(tsp->player_list, item->uri);
-      if (i == 0 && existing_index >= 0 &&
-          tsp->player_list->now_playing_index != existing_index) {
-        tsp->player_list->now_playing_index = existing_index;
-        index_changed = true;
-      }
-      if (existing_index >= 0) {
-        delete item;
-        tracks[i] = NULL;
-        continue;
-      }
-      if (i == 0) {
-        tsp->player_list->now_playing_index = (int)tsp->player_list->items.size();
-        index_changed = true;
-      }
-      tsp->player_list->items.push_back(item);
-      tracks[i] = NULL;
-      added++;
-    }
-    DeleteItemVector(&tracks);
-  }
-  tsp->player_list->total_length = (int)tsp->player_list->items.size();
-  tsp->player_list->dynamic_loading = false;
-  if (append_only && added == 0 && !index_changed)
-    return true;
-  DispatchPlayerCallback(tsp, kTspCallbackEvent_ItemListChanged, tsp->player_list, NULL);
-  std::cout << "[DEBUG] RefreshPlayerListFromQueue: "
-            << (append_only ? "appended " : "loaded ") << added
-            << " tracks from Spotify queue; player list now has "
-            << tsp->player_list->items.size() << " tracks" << std::endl;
-  return true;
-}
-
 static void AppendSearchTracks(std::vector<TspItem*> *tracks, Tsp *tsp, const std::string &query, int limit) {
   std::string url = "https://api.spotify.com/v1/search?q=" + UrlEncode(query) +
                     "&type=track&limit=" + std::to_string(limit);
@@ -1746,43 +1609,7 @@ static std::string ExtractSpotifyUri(const std::string &json, const std::string 
   return json.substr(pos, quote_end - pos);
 }
 
-static std::string GetSpotiampDeviceIdFromToken(const std::string &access_token) {
-  if (access_token.empty()) return "";
-  static std::mutex device_cache_mutex;
-  static std::string cached_token;
-  static std::string cached_device_id;
-  {
-    std::lock_guard<std::mutex> lock(device_cache_mutex);
-    if (cached_token == access_token && !cached_device_id.empty()) {
-      return cached_device_id;
-    }
-  }
-
-  std::string devices_json = HttpGet("https://api.spotify.com/v1/me/player/devices", access_token);
-  auto devices = JsonExtractArray(devices_json, "devices");
-  std::string found_id = "";
-  for (const auto &dev : devices) {
-    std::string name = JsonExtractString(dev, "name");
-    if (name == "Spotiamp") {
-      found_id = JsonExtractString(dev, "id");
-      break;
-    }
-  }
-
-  if (!found_id.empty()) {
-    std::lock_guard<std::mutex> lock(device_cache_mutex);
-    cached_token = access_token;
-    cached_device_id = found_id;
-  }
-  return found_id;
-}
-
-static std::string GetSpotiampDeviceId(Tsp *tsp) {
-  return GetSpotiampDeviceIdFromToken(GetAccessToken(tsp));
-}
-
-// Playback bridge / subprocess control
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
+// Playback bridge control
 static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
   (void)user;
   (void)pass;
@@ -1815,255 +1642,6 @@ static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buf
   // handed to the audio device. During a local transition hold we intentionally
   // do not drain here, otherwise discarded audio would move the visible clock.
 }
-#elif defined(_WIN32)
-static std::string QuoteWindowsArg(const std::string &arg) {
-  std::string out = "\"";
-  for (char c : arg) {
-    if (c == '"' || c == '\\')
-      out += '\\';
-    out += c;
-  }
-  out += "\"";
-  return out;
-}
-
-static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
-  if (g_librespot_process.hProcess || g_librespot_stdout != INVALID_HANDLE_VALUE)
-    return;
-
-  SECURITY_ATTRIBUTES sa;
-  memset(&sa, 0, sizeof(sa));
-  sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-
-  HANDLE read_pipe = INVALID_HANDLE_VALUE;
-  HANDLE write_pipe = INVALID_HANDLE_VALUE;
-  if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0))
-    return;
-  SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
-
-  HANDLE log_file = CreateFileA("librespot_err.log", GENERIC_WRITE,
-                                FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                FILE_ATTRIBUTE_NORMAL, NULL);
-  if (log_file == INVALID_HANDLE_VALUE)
-    log_file = GetStdHandle(STD_ERROR_HANDLE);
-
-  std::vector<std::string> args_vec;
-  args_vec.push_back("librespot");
-  args_vec.push_back("-B");
-  args_vec.push_back("pipe");
-  args_vec.push_back("-f");
-  args_vec.push_back("S16");
-  args_vec.push_back("-R");
-  args_vec.push_back("100");
-  args_vec.push_back("-E");
-  args_vec.push_back("fixed");
-  args_vec.push_back("-n");
-  args_vec.push_back("Spotiamp");
-
-  if (token && *token) {
-    args_vec.push_back("-k");
-    args_vec.push_back(token);
-  } else if (user && *user && pass && *pass) {
-    args_vec.push_back("-u");
-    args_vec.push_back(user);
-    args_vec.push_back("-p");
-    args_vec.push_back(pass);
-  }
-
-  std::string command_line;
-  for (size_t i = 0; i < args_vec.size(); ++i) {
-    if (i > 0)
-      command_line += " ";
-    command_line += QuoteWindowsArg(args_vec[i]);
-  }
-
-  STARTUPINFOA si;
-  memset(&si, 0, sizeof(si));
-  si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-  si.hStdOutput = write_pipe;
-  si.hStdError = log_file;
-
-  PROCESS_INFORMATION pi;
-  memset(&pi, 0, sizeof(pi));
-  std::vector<char> mutable_command(command_line.begin(), command_line.end());
-  mutable_command.push_back('\0');
-  BOOL ok = CreateProcessA(NULL, mutable_command.data(), NULL, NULL, TRUE,
-                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-
-  CloseHandle(write_pipe);
-  if (log_file != INVALID_HANDLE_VALUE && log_file != GetStdHandle(STD_ERROR_HANDLE))
-    CloseHandle(log_file);
-
-  if (!ok) {
-    CloseHandle(read_pipe);
-    return;
-  }
-
-  g_librespot_process = pi;
-  g_librespot_stdout = read_pipe;
-}
-
-static void KillLibrespot() {
-  if (g_librespot_process.hProcess) {
-    TerminateProcess(g_librespot_process.hProcess, 0);
-    WaitForSingleObject(g_librespot_process.hProcess, 3000);
-    CloseHandle(g_librespot_process.hThread);
-    CloseHandle(g_librespot_process.hProcess);
-    memset(&g_librespot_process, 0, sizeof(g_librespot_process));
-  }
-  if (g_librespot_stdout != INVALID_HANDLE_VALUE) {
-    CloseHandle(g_librespot_stdout);
-    g_librespot_stdout = INVALID_HANDLE_VALUE;
-  }
-}
-
-static bool LibrespotOutputAvailable() {
-  return g_librespot_stdout != INVALID_HANDLE_VALUE;
-}
-
-static int ReadLibrespotOutput(char *buffer, int size) {
-  if (g_librespot_stdout == INVALID_HANDLE_VALUE)
-    return -1;
-  DWORD bytes_read = 0;
-  if (!ReadFile(g_librespot_stdout, buffer, (DWORD)size, &bytes_read, NULL))
-    return -1;
-  return (int)bytes_read;
-}
-
-static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buffer_size) {
-  if (g_librespot_stdout == INVALID_HANDLE_VALUE)
-    return;
-
-  while (true) {
-    DWORD available = 0;
-    if (!PeekNamedPipe(g_librespot_stdout, NULL, 0, NULL, &available, NULL) || available == 0)
-      break;
-
-    DWORD to_read = available;
-    if (to_read > (DWORD)(buffer_size - *residual_count))
-      to_read = (DWORD)(buffer_size - *residual_count);
-
-    DWORD bytes_read = 0;
-    if (!ReadFile(g_librespot_stdout, buffer + *residual_count, to_read, &bytes_read, NULL) || bytes_read == 0)
-      break;
-
-    int total_bytes = *residual_count + (int)bytes_read;
-    int process_bytes = total_bytes & ~3;
-    *residual_count = total_bytes - process_bytes;
-    if (*residual_count > 0)
-      memmove(buffer, buffer + process_bytes, *residual_count);
-  }
-}
-#else
-static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
-  int pipefd[2];
-  if (pipe(pipefd) < 0) return;
-
-  g_librespot_pid = fork();
-  if (g_librespot_pid == 0) {
-    // Child
-    close(pipefd[0]);
-    dup2(pipefd[1], STDOUT_FILENO);
-    close(pipefd[1]);
-
-    int logfd = open("librespot_err.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (logfd >= 0) {
-      dup2(logfd, STDERR_FILENO);
-      close(logfd);
-    }
-
-    std::vector<std::string> args_vec;
-    args_vec.push_back("librespot");
-    args_vec.push_back("-B");
-    args_vec.push_back("pipe");
-    args_vec.push_back("-f");
-    args_vec.push_back("S16");
-    args_vec.push_back("-R");
-    args_vec.push_back("100");
-    args_vec.push_back("-E");
-    args_vec.push_back("fixed");
-    args_vec.push_back("-n");
-    args_vec.push_back("Spotiamp");
-
-    if (token && *token) {
-      args_vec.push_back("-k");
-      args_vec.push_back(token);
-    } else if (user && *user && pass && *pass) {
-      args_vec.push_back("-u");
-      args_vec.push_back(user);
-      args_vec.push_back("-p");
-      args_vec.push_back(pass);
-    }
-
-    std::vector<char*> args;
-    for (size_t i = 0; i < args_vec.size(); ++i) {
-      args.push_back((char*)args_vec[i].c_str());
-    }
-    args.push_back(NULL);
-
-    execvp("librespot", args.data());
-    exit(1);
-  } else {
-    // Parent
-    close(pipefd[1]);
-    g_librespot_stdout_fd = pipefd[0];
-  }
-}
-
-static void KillLibrespot() {
-  if (g_librespot_pid > 0) {
-    kill(g_librespot_pid, SIGTERM);
-    int status;
-    waitpid(g_librespot_pid, &status, 0);
-    g_librespot_pid = 0;
-  }
-  if (g_librespot_stdout_fd >= 0) {
-    close(g_librespot_stdout_fd);
-    g_librespot_stdout_fd = -1;
-  }
-}
-
-static bool LibrespotOutputAvailable() {
-  return g_librespot_stdout_fd >= 0;
-}
-
-static int ReadLibrespotOutput(char *buffer, int size) {
-  if (g_librespot_stdout_fd < 0)
-    return -1;
-  return (int)read(g_librespot_stdout_fd, buffer, size);
-}
-
-static void DrainLibrespotPipeAligned(char *buffer, int *residual_count, int buffer_size) {
-  if (g_librespot_stdout_fd < 0)
-    return;
-
-  while (true) {
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(g_librespot_stdout_fd, &read_fds);
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
-    int ready = select(g_librespot_stdout_fd + 1, &read_fds, NULL, NULL, &tv);
-    if (ready <= 0 || !FD_ISSET(g_librespot_stdout_fd, &read_fds))
-      break;
-
-    ssize_t bytes_read = read(g_librespot_stdout_fd, buffer + *residual_count,
-                              buffer_size - *residual_count);
-    if (bytes_read <= 0)
-      break;
-
-    int total_bytes = *residual_count + (int)bytes_read;
-    int process_bytes = total_bytes & ~3;
-    *residual_count = total_bytes - process_bytes;
-    if (*residual_count > 0)
-      memmove(buffer, buffer + process_bytes, *residual_count);
-  }
-}
-#endif
 
 // Background threads
 static void AudioThreadProc(Tsp *tsp) {
@@ -2079,9 +1657,7 @@ static void AudioThreadProc(Tsp *tsp) {
   format.replaygain_album = 0.0f;
 
   while (tsp->audio_thread_running) {
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     ApplyRustBridgePlaybackState(tsp);
-#endif
     bool is_playing = false;
     bool transition_audio = false;
     bool desired_playing = false;
@@ -2094,7 +1670,6 @@ static void AudioThreadProc(Tsp *tsp) {
       long long now_ms = NowMonotonicMs();
       transition_audio = AudioTransitionLocked(tsp, now_ms);
     }
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     if (desired_playing && !locally_stopped && !transition_audio) {
       SpPlaybackSnapshot snapshot = {};
       if (sp_playback_bridge_snapshot(&snapshot) == 0 &&
@@ -2102,7 +1677,6 @@ static void AudioThreadProc(Tsp *tsp) {
         is_playing = true;
       }
     }
-#endif
     if (!is_playing || transition_audio) {
       if (!output_paused) {
         DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
@@ -2128,9 +1702,7 @@ static void AudioThreadProc(Tsp *tsp) {
       SleepForMicroseconds(10000);
       continue;
     }
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     ApplyRustBridgePlaybackState(tsp);
-#endif
 
     int total_bytes = residual_count + bytes_read;
     int process_bytes = total_bytes & ~3; // Frame-align to 4 bytes
@@ -2162,9 +1734,7 @@ static void AudioThreadProc(Tsp *tsp) {
 
 static void PollThreadProc(Tsp *tsp) {
   while (tsp->poll_thread_running) {
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     ApplyRustBridgePlaybackState(tsp);
-#endif
     std::string access_token;
     {
       std::lock_guard<std::mutex> lock(tsp->mutex);
@@ -2228,11 +1798,7 @@ static void PollThreadProc(Tsp *tsp) {
         bool command_in_flight = tsp->local_control_until_ms > now_ms;
         bool suppress_play_state = command_in_flight && tsp->local_desired_playing != is_p;
         bool suppress_stopped_metadata = tsp->local_stopped && !is_p;
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
         bool bridge_owns_position = sp_playback_bridge_is_running() != 0;
-#else
-        bool bridge_owns_position = false;
-#endif
         bool suppress_progress = PendingPositionSyncLocked(tsp) &&
                                  abs(pos - local_predicted_pos) > 1500;
         bool stale_end_restart_update = has_valid_item && has_numeric_progress &&
@@ -2287,15 +1853,6 @@ static void PollThreadProc(Tsp *tsp) {
 
       if (now_playing_changed) {
         DispatchPlayerCallback(tsp, kTspCallbackEvent_NowPlayingChanged);
-        std::string queue_sync_context;
-        {
-          std::lock_guard<std::mutex> lock(tsp->mutex);
-          if (tsp->player_list && !tsp->queue_sync_context_uri.empty() &&
-              tsp->player_list->uri == tsp->queue_sync_context_uri)
-            queue_sync_context = tsp->queue_sync_context_uri;
-        }
-        if (!queue_sync_context.empty())
-          RefreshPlayerListFromQueue(tsp, access_token, queue_sync_context, true);
       } else if (!play_state_suppressed && has_numeric_progress && !(old_is_playing && !is_p && pos == 0 && old_pos > 0) &&
                  (old_pos / 1000 != pos / 1000 || old_is_playing != is_p)) {
         DispatchPlayerCallback(tsp, is_p ? kTspCallbackEvent_Resume : kTspCallbackEvent_Pause);
@@ -2306,9 +1863,7 @@ static void PollThreadProc(Tsp *tsp) {
     } else {
     }
 
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     ApplyRustBridgePlaybackState(tsp);
-#endif
     
     int sleep_steps = 20;
     {
@@ -2869,48 +2424,28 @@ TSP_PUBLIC int TspPlayerGetVolume(Tsp *tsp) {
 }
 
 TSP_PUBLIC TspBool TspPlayerIsLoading(Tsp *tsp) {
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
   (void)tsp;
   SpPlaybackSnapshot snapshot = {};
   return sp_playback_bridge_snapshot(&snapshot) == 0 && snapshot.loading;
-#else
-  (void)tsp;
-  return 0;
-#endif
 }
 
 TSP_PUBLIC void TspPlayerNextTrack(Tsp *tsp) {
   int next_index = PickNextIndex(tsp, 1);
-  std::string next_uri;
   if (tsp && tsp->player_list && next_index >= 0 && next_index < (int)tsp->player_list->items.size()) {
     TspItem *item = tsp->player_list->items[next_index];
-    if (item) next_uri = item->uri;
-    if (!next_uri.empty())
+    if (item && !item->uri.empty())
       SetPendingNowPlayingIndex(tsp, next_index);
   }
 
-  std::string access_token = GetAccessToken(tsp);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
   if (sp_playback_bridge_is_running()) {
     if (tsp && tsp->player_list && next_index >= 0 &&
         BridgeLoadItemList(tsp->player_list, next_index, 0))
       return;
-    if (sp_playback_bridge_next() == 0)
-      return;
-  }
-#endif
-  if (!access_token.empty()) {
-    if (!next_uri.empty()) {
-      std::string data = "{ \"uris\": [ \"" + next_uri + "\" ], \"position_ms\": 0 }";
-      HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
-    } else {
-      HttpPostOrPutDeviceAsync("POST", "https://api.spotify.com/v1/me/player/next", access_token);
-    }
+    sp_playback_bridge_next();
   }
 }
 
 TSP_PUBLIC void TspPlayerPause(Tsp *tsp) {
-  std::string access_token = GetAccessToken(tsp);
   if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_ms = CurrentPlayerPositionMsLocked(tsp);
@@ -2922,18 +2457,12 @@ TSP_PUBLIC void TspPlayerPause(Tsp *tsp) {
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
-  if (sp_playback_bridge_is_running()) {
+  if (sp_playback_bridge_is_running())
     sp_playback_bridge_pause();
-  } else
-#endif
-  if (!access_token.empty())
-    HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/pause", access_token);
   DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
 }
 
 TSP_PUBLIC void TspPlayerPlay(Tsp *tsp) {
-  std::string access_token = GetAccessToken(tsp);
   if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_updated_ms = NowMonotonicMs();
@@ -2943,17 +2472,8 @@ TSP_PUBLIC void TspPlayerPlay(Tsp *tsp) {
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_FlushBuffer);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
-  if (sp_playback_bridge_is_running()) {
+  if (sp_playback_bridge_is_running())
     sp_playback_bridge_play();
-  } else
-#endif
-  if (!access_token.empty()) {
-    std::thread([access_token]() {
-      std::string device_id = GetSpotiampDeviceIdFromToken(access_token);
-      HttpPostOrPut("PUT", UrlWithDeviceId("https://api.spotify.com/v1/me/player/play", device_id), access_token);
-    }).detach();
-  }
 }
 
 TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, const char *track_uri, int index) {
@@ -2968,13 +2488,12 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
       tsp->player_position_updated_ms = NowMonotonicMs();
       tsp->local_desired_playing = true;
       tsp->local_stopped = false;
-      tsp->queue_sync_context_uri.clear();
       long long now_ms = NowMonotonicMs();
       StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
     }
     DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
     DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
-    std::thread([tsp, access_token, context, radio_seed_uris]() {
+    std::thread([tsp, context, radio_seed_uris]() {
       std::vector<TspItem*> tracks;
       BuildTracksForUri(&tracks, tsp, context, "", radio_seed_uris);
       if (tracks.empty())
@@ -2985,64 +2504,15 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
       tsp->player_list->items = tracks;
       tsp->player_list->now_playing_index = 0;
       SetPendingNowPlayingIndex(tsp, 0);
-
-      std::string data = "{ \"uris\": [";
-      int added = 0;
-      for (auto *item : tsp->player_list->items) {
-        if (!item || item->uri.empty())
-          continue;
-        if (added)
-          data += ",";
-        data += " \"" + item->uri + "\"";
-        if (++added >= 50)
-          break;
-      }
-      data += " ], \"position_ms\": 0 }";
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
-      if (sp_playback_bridge_is_running()) {
+      if (sp_playback_bridge_is_running())
         BridgeLoadItemList(tsp->player_list, 0, 0);
-      } else
-#endif
-      if (added > 0)
-        HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
     }).detach();
     return kTspErrorOk;
   }
 
-  bool refresh_queue = false;
-  bool handled_by_bridge = false;
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
   if (sp_playback_bridge_is_running()) {
     std::string track = track_uri ? track_uri : "";
-    handled_by_bridge = BridgeLoadContext(context, track, index, 0);
-  }
-#endif
-  if (!handled_by_bridge && !access_token.empty()) {
-    std::string track = track_uri ? track_uri : "";
-    std::string data = "{ \"context_uri\": \"" + context + "\"";
-    if (!track.empty()) {
-      data += ", \"offset\": { \"uri\": \"" + track + "\" }";
-    } else if (index >= 0) {
-      data += ", \"offset\": { \"position\": " + std::to_string(index) + " }";
-    }
-    if (!track.empty() || index >= 0)
-      data += ", \"position_ms\": 0";
-    data += " }";
-    refresh_queue = track.empty() && index < 0 && context.rfind("spotify:playlist:", 0) == 0;
-    if (refresh_queue) {
-      std::thread([tsp, access_token, context, data]() {
-        std::string device_id = GetSpotiampDeviceIdFromToken(access_token);
-        HttpPostOrPut("PUT", UrlWithDeviceId("https://api.spotify.com/v1/me/player/play", device_id),
-                      access_token, data);
-        for (int attempt = 0; attempt < 5; ++attempt) {
-          SleepForMicroseconds(500000);
-          if (RefreshPlayerListFromQueue(tsp, access_token, context))
-            break;
-        }
-      }).detach();
-    } else {
-      HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
-    }
+    BridgeLoadContext(context, track, index, 0);
   }
   if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
@@ -3051,7 +2521,6 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
     tsp->player_position_updated_ms = NowMonotonicMs();
     tsp->local_desired_playing = true;
     tsp->local_stopped = false;
-    tsp->queue_sync_context_uri = refresh_queue ? context : "";
     {
       long long now_ms = NowMonotonicMs();
       StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
@@ -3065,72 +2534,27 @@ TSP_PUBLIC TspError TspPlayerPlayContext(Tsp *tsp, const char *context_uri, cons
 TSP_PUBLIC void TspPlayerPlayItemList(Tsp *tsp, TspItemList *tl, int index) {
   if (!tsp || !tl || index < 0 || index >= (int)tl->items.size()) return;
   
-  std::string list_uri = tl->uri;
-  bool queue_synced_context = list_uri.rfind("spotify:playlist:", 0) == 0 &&
-                              !tsp->queue_sync_context_uri.empty() &&
-                              tsp->queue_sync_context_uri == list_uri;
   CopyItemListContents(tsp->player_list, tl);
-  TspItem *item = tl->items[index];
   tl->now_playing_index = index;
   tsp->player_list->now_playing_index = index;
-  tsp->queue_sync_context_uri = queue_synced_context ? list_uri : "";
-  std::string item_uri = item->uri;
   SetPendingNowPlayingIndex(tsp, index);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
-  if (sp_playback_bridge_is_running() && BridgeLoadItemList(tsp->player_list, index, 0))
-    return;
-#endif
-  
-  std::string access_token = GetAccessToken(tsp);
-  if (!access_token.empty()) {
-    if (queue_synced_context) {
-      std::string data = "{ \"context_uri\": \"" + list_uri +
-                         "\", \"offset\": { \"uri\": \"" + item_uri +
-                         "\" }, \"position_ms\": 0 }";
-      std::thread([tsp, access_token, list_uri, data]() {
-        std::string device_id = GetSpotiampDeviceIdFromToken(access_token);
-        HttpPostOrPut("PUT", UrlWithDeviceId("https://api.spotify.com/v1/me/player/play", device_id),
-                      access_token, data);
-        for (int attempt = 0; attempt < 5; ++attempt) {
-          SleepForMicroseconds(500000);
-          if (RefreshPlayerListFromQueue(tsp, access_token, list_uri, true))
-            break;
-        }
-      }).detach();
-    } else {
-      std::string data = "{ \"uris\": [ \"" + item_uri + "\" ], \"position_ms\": 0 }";
-      HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
-    }
-  }
+  if (sp_playback_bridge_is_running())
+    BridgeLoadItemList(tsp->player_list, index, 0);
 }
 
 TSP_PUBLIC void TspPlayerPrevTrack(Tsp *tsp) {
   int prev_index = PickNextIndex(tsp, -1);
-  std::string prev_uri;
   if (tsp && tsp->player_list && prev_index >= 0 && prev_index < (int)tsp->player_list->items.size()) {
     TspItem *item = tsp->player_list->items[prev_index];
-    if (item) prev_uri = item->uri;
-    if (!prev_uri.empty())
+    if (item && !item->uri.empty())
       SetPendingNowPlayingIndex(tsp, prev_index);
   }
 
-  std::string access_token = GetAccessToken(tsp);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
   if (sp_playback_bridge_is_running()) {
     if (tsp && tsp->player_list && prev_index >= 0 &&
         BridgeLoadItemList(tsp->player_list, prev_index, 0))
       return;
-    if (sp_playback_bridge_prev() == 0)
-      return;
-  }
-#endif
-  if (!access_token.empty()) {
-    if (!prev_uri.empty()) {
-      std::string data = "{ \"uris\": [ \"" + prev_uri + "\" ], \"position_ms\": 0 }";
-      HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/play", access_token, data);
-    } else {
-      HttpPostOrPutDeviceAsync("POST", "https://api.spotify.com/v1/me/player/previous", access_token);
-    }
+    sp_playback_bridge_prev();
   }
 }
 
@@ -3154,25 +2578,16 @@ TSP_PUBLIC TspError TspPlayerSeek(Tsp *tsp, int position_ms) {
                                       resume_after_seek ? 40 : 0);
       }
     }
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     FlushRustBridgeAudio();
-#endif
     if (resume_after_seek) {
       DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
     } else {
       DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
       DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
     }
-    std::string access_token = GetAccessToken(tsp);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     if (sp_playback_bridge_is_running()) {
       sp_playback_bridge_seek((uint32_t)position_ms);
       return kTspErrorOk;
-    }
-#endif
-    if (!access_token.empty()) {
-      std::string url = "https://api.spotify.com/v1/me/player/seek?position_ms=" + std::to_string(position_ms);
-      HttpPostOrPutDeviceAsync("PUT", url, access_token);
     }
   }
   return kTspErrorOk;
@@ -3186,10 +2601,8 @@ TSP_PUBLIC void TspPlayerSetEqualizer(Tsp *tsp, int enable, float pregain, const
 
 TSP_PUBLIC void TspPlayerSetNowPlayingIndex(Tsp *tsp, int track) {
   if (SetNowPlayingIndex(tsp, track)) {
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     if (sp_playback_bridge_is_running() && tsp && tsp->player_list)
       BridgeLoadItemList(tsp->player_list, track, 0);
-#endif
   } else if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_ms = 0;
@@ -3203,17 +2616,10 @@ TSP_PUBLIC TspError TspPlayerSetRepeat(Tsp *tsp, int repeat) {
       std::lock_guard<std::mutex> lock(tsp->mutex);
       tsp->repeat = repeat != 0;
     }
-    std::string access_token = GetAccessToken(tsp);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     if (sp_playback_bridge_is_running()) {
       sp_playback_bridge_set_repeat(repeat ? 1 : 0);
       DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
       return kTspErrorOk;
-    }
-#endif
-    if (!access_token.empty()) {
-      std::string url = "https://api.spotify.com/v1/me/player/repeat?state=" + std::string(repeat ? "track" : "off");
-      HttpPostOrPutDeviceAsync("PUT", url, access_token);
     }
     DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
   }
@@ -3226,17 +2632,10 @@ TSP_PUBLIC TspError TspPlayerSetShuffle(Tsp *tsp, int shuffle) {
       std::lock_guard<std::mutex> lock(tsp->mutex);
       tsp->shuffle = shuffle != 0;
     }
-    std::string access_token = GetAccessToken(tsp);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
     if (sp_playback_bridge_is_running()) {
       sp_playback_bridge_set_shuffle(shuffle);
       DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
       return kTspErrorOk;
-    }
-#endif
-    if (!access_token.empty()) {
-      std::string url = "https://api.spotify.com/v1/me/player/shuffle?state=" + std::string(shuffle ? "true" : "false");
-      HttpPostOrPutDeviceAsync("PUT", url, access_token);
     }
     DispatchPlayerCallback(tsp, kTspCallbackEvent_PlayControlsChanged);
   }
@@ -3258,7 +2657,6 @@ TSP_PUBLIC TspError TspPlayerSetVolume(Tsp *tsp, int volume) {
 }
 
 TSP_PUBLIC void TspPlayerStop(Tsp *tsp) {
-  std::string access_token = GetAccessToken(tsp);
   if (tsp) {
     std::lock_guard<std::mutex> lock(tsp->mutex);
     tsp->player_position_ms = 0;
@@ -3271,13 +2669,8 @@ TSP_PUBLIC void TspPlayerStop(Tsp *tsp) {
     tsp->local_control_until_ms = NowMonotonicMs() + 5000;
   }
   DispatchAudioControl(tsp, kTspAudioFlag_Pause | kTspAudioFlag_FlushBuffer);
-#if defined(SPOTIAMP_WITH_RUST_BRIDGE)
-  if (sp_playback_bridge_is_running()) {
+  if (sp_playback_bridge_is_running())
     sp_playback_bridge_stop_playback();
-  } else
-#endif
-  if (!access_token.empty())
-    HttpPostOrPutDeviceAsync("PUT", "https://api.spotify.com/v1/me/player/pause", access_token);
   DispatchPlayerCallback(tsp, kTspCallbackEvent_Pause);
 }
 

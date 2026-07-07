@@ -37,6 +37,9 @@ public:
 static bool g_quit;
 static Point g_drag_start;
 static Point g_drag_start_global;
+static Point g_pending_drag_start;
+static Point g_pending_drag_start_global;
+static bool g_has_pending_drag_start = false;
 static Rect g_drag_start_rects[16];
 static int g_drag_start_width;
 static int g_drag_start_height;
@@ -210,8 +213,14 @@ void PlatformWindow::Minimize() {
 }
 
 void PlatformWindow::InitDraggingOrSizing() {
-  SDL_GetMouseState(&g_drag_start.x, &g_drag_start.y);
-  SDL_GetGlobalMouseState(&g_drag_start_global.x, &g_drag_start_global.y);
+  if (g_has_pending_drag_start) {
+    g_drag_start = g_pending_drag_start;
+    g_drag_start_global = g_pending_drag_start_global;
+    g_has_pending_drag_start = false;
+  } else {
+    SDL_GetMouseState(&g_drag_start.x, &g_drag_start.y);
+    SDL_GetGlobalMouseState(&g_drag_start_global.x, &g_drag_start_global.y);
+  }
   for (int i = 0; i < g_num_drag_windows; ++i)
     g_drag_start_rects[i] = *g_drag_windows[i]->screen_rect();
   PlatformWindow *w = g_num_drag_windows > 0 ? g_drag_windows[0] : NULL;
@@ -283,7 +292,16 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
       int d = w->double_size() ? 1 : 0;
       int x = event->button.x >> d;
       int y = event->button.y >> d;
+      int wx = 0;
+      int wy = 0;
+      SDL_GetWindowPosition(w->window_, &wx, &wy);
+      g_pending_drag_start.x = event->button.x;
+      g_pending_drag_start.y = event->button.y;
+      g_pending_drag_start_global.x = wx + event->button.x;
+      g_pending_drag_start_global.y = wy + event->button.y;
+      g_has_pending_drag_start = true;
       if (event->button.button == SDL_BUTTON_LEFT) {
+        w->MouseMove(x, y);
         if (event->button.clicks == 2) {
           w->LeftButtonDouble(x, y);
         } else {
@@ -946,6 +964,7 @@ static bool MenuItemSelectable(const MenuItem &item) {
 
 static SDL_Window *g_active_menu_popup = NULL;
 static Uint32 g_active_menu_popup_id = 0;
+static Uint32 g_active_menu_open_ticks = 0;
 static int g_active_menu_width = 0;
 static int g_active_menu_row_h = 17;
 static int g_active_menu_visible_rows = 0;
@@ -1011,6 +1030,13 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
   SDL_UpdateWindowSurface(popup);
 }
 
+static bool MenuJustOpened(Uint32 event_ticks, Uint32 open_ticks) {
+  if (!open_ticks)
+    return false;
+  Uint32 ticks = event_ticks ? event_ticks : SDL_GetTicks();
+  return (Uint32)(ticks - open_ticks) < 200;
+}
+
 int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
   if (g_menu_items.empty())
     return 0;
@@ -1063,6 +1089,7 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
   int hover = -1;
   int result = 0;
   bool done = false;
+  Uint32 popup_open_ticks = SDL_GetTicks();
   PaintPopupMenu(popup, popup_w, row_h, visible_rows, scroll, hover);
 
   while (!done) {
@@ -1114,6 +1141,8 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
       break;
     case SDL_MOUSEBUTTONDOWN:
       if (event.button.windowID != popup_id) {
+        if (MenuJustOpened(event.button.timestamp, popup_open_ticks))
+          break;
         done = true;
       } else if (event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT) {
         int row = event.button.y / row_h;
@@ -1124,6 +1153,11 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
         }
         done = true;
       }
+      break;
+    case SDL_MOUSEBUTTONUP:
+      if (event.button.windowID != popup_id &&
+          MenuJustOpened(event.button.timestamp, popup_open_ticks))
+        break;
       break;
     case SDL_WINDOWEVENT:
       if (event.window.windowID == popup_id && event.window.event == SDL_WINDOWEVENT_EXPOSED)
@@ -1146,6 +1180,7 @@ static void CloseActiveMenu(int result, bool invoke_callback) {
   std::function<void(int)> callback = g_active_menu_callback;
   g_active_menu_popup = NULL;
   g_active_menu_popup_id = 0;
+  g_active_menu_open_ticks = 0;
   g_active_menu_callback = NULL;
   SDL_DestroyWindow(popup);
 
@@ -1200,6 +1235,7 @@ static bool OpenActiveMenu(PlatformWindow *window, int x, int y, std::function<v
     return false;
 
   g_active_menu_popup_id = SDL_GetWindowID(g_active_menu_popup);
+  g_active_menu_open_ticks = SDL_GetTicks();
   g_active_menu_scroll = 0;
   g_active_menu_hover = -1;
   g_active_menu_callback = callback;
@@ -1264,6 +1300,8 @@ static bool HandleActiveMenuEvent(SDL_Event *event) {
     return true;
   case SDL_MOUSEBUTTONDOWN:
     if (event->button.windowID != g_active_menu_popup_id) {
+      if (MenuJustOpened(event->button.timestamp, g_active_menu_open_ticks))
+        return true;
       CloseActiveMenu(0, false);
       return true;
     }
@@ -1279,6 +1317,11 @@ static bool HandleActiveMenuEvent(SDL_Event *event) {
       CloseActiveMenu(result, result != 0);
     }
     return true;
+  case SDL_MOUSEBUTTONUP:
+    if (event->button.windowID != g_active_menu_popup_id &&
+        MenuJustOpened(event->button.timestamp, g_active_menu_open_ticks))
+      return true;
+    return false;
   case SDL_WINDOWEVENT:
     if (event->window.windowID == g_active_menu_popup_id) {
       if (event->window.event == SDL_WINDOWEVENT_EXPOSED) {
