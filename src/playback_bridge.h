@@ -9,7 +9,7 @@ extern "C" {
 
 uint32_t sp_playback_bridge_abi_version(void);
 const char *sp_playback_bridge_version_string(void);
-int sp_playback_bridge_start(const char *access_token, const char *cache_dir);
+int sp_playback_bridge_start(const char *access_token, const char *cache_dir, char *error_buf, int error_buf_size);
 void sp_playback_bridge_stop(void);
 int sp_playback_bridge_is_running(void);
 intptr_t sp_playback_bridge_read(void *buffer, uintptr_t buffer_size);

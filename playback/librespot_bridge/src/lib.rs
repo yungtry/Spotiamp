@@ -535,6 +535,8 @@ pub extern "C" fn sp_playback_bridge_version_string() -> *const c_char {
 pub extern "C" fn sp_playback_bridge_start(
     access_token: *const c_char,
     cache_dir: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_size: i32,
 ) -> i32 {
     let Some(token) = cstr_to_string(access_token) else {
         return -1;
@@ -552,10 +554,22 @@ pub extern "C" fn sp_playback_bridge_start(
     match start_bridge(token, cache_dir) {
         Ok(new_bridge) => {
             *bridge = Some(new_bridge);
+            if !error_buf.is_null() && error_buf_size > 0 {
+                unsafe { *error_buf = 0; }
+            }
             0
         }
         Err(err) => {
             eprintln!("[spotiamp_playback_bridge] start failed: {err}");
+            if !error_buf.is_null() && error_buf_size > 0 {
+                let err_cstr = std::ffi::CString::new(err).unwrap_or_default();
+                let bytes = err_cstr.as_bytes_with_nul();
+                let len = std::cmp::min(bytes.len(), error_buf_size as usize - 1);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), error_buf as *mut u8, len);
+                    *error_buf.add(len) = 0;
+                }
+            }
             -3
         }
     }

@@ -1613,9 +1613,13 @@ static std::string ExtractSpotifyUri(const std::string &json, const std::string 
 static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
   (void)user;
   (void)pass;
-  int rc = sp_playback_bridge_start(token, NULL);
+  char err_buf[1024] = {0};
+  int rc = sp_playback_bridge_start(token, NULL, err_buf, sizeof(err_buf));
   if (rc != 0) {
-    std::cout << "[DEBUG] Rust playback bridge start failed: " << rc << std::endl;
+    std::cout << "[DEBUG] Rust playback bridge start failed (" << rc << "): " << err_buf << std::endl;
+#if defined(_WIN32)
+    MessageBoxA(NULL, err_buf, "Spotiamp Playback Bridge Error", MB_ICONERROR | MB_OK);
+#endif
   }
 }
 

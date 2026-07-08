@@ -10,6 +10,60 @@
 #define pclose _pclose
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+
+struct LoginData {
+  std::string *username;
+  std::string *password;
+};
+
+static INT_PTR CALLBACK LoginDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_INITDIALOG) {
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, lParam);
+    return TRUE;
+  }
+  if (msg == WM_COMMAND) {
+    if (LOWORD(wParam) == IDOK) {
+      LoginData *data = (LoginData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+      char buf[256];
+      GetDlgItemTextA(hwnd, 100, buf, sizeof(buf));
+      *data->username = buf;
+      GetDlgItemTextA(hwnd, 101, buf, sizeof(buf));
+      *data->password = buf;
+      EndDialog(hwnd, 1);
+      return TRUE;
+    } else if (LOWORD(wParam) == IDCANCEL) {
+      EndDialog(hwnd, 0);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static INT_PTR CALLBACK InputDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_INITDIALOG) {
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, lParam);
+    return TRUE;
+  }
+  if (msg == WM_COMMAND) {
+    if (LOWORD(wParam) == IDOK) {
+      std::string *data = (std::string*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+      char buf[1024];
+      GetDlgItemTextA(hwnd, 100, buf, sizeof(buf));
+      *data = buf;
+      EndDialog(hwnd, 1);
+      return TRUE;
+    } else if (LOWORD(wParam) == IDCANCEL) {
+      EndDialog(hwnd, 0);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+#endif
+
 // ---------------------------------------------------------------------------
 // Helper: run a command and capture its stdout
 // ---------------------------------------------------------------------------
@@ -196,6 +250,11 @@ bool ShowLoginDialog(PlatformWindow *parent, std::string *username, std::string 
   if (!(std::cin >> *password)) return false;
   return true;
 
+#elif defined(_WIN32)
+  LoginData data = { username, password };
+  INT_PTR ret = DialogBoxParamA(GetModuleHandle(NULL), MAKEINTRESOURCEA(1001), NULL, LoginDialogProc, (LPARAM)&data);
+  return ret == 1;
+
 #else
   std::cout << "\n=== Sign in to Spotify ===" << std::endl;
   std::cout << "Username: ";
@@ -220,6 +279,11 @@ std::string ShowSearchDialog(PlatformWindow *parent, Tsp *tsp) {
   std::cout << "Enter search query: ";
   std::string q;
   std::cin >> q;
+  return q;
+
+#elif defined(_WIN32)
+  std::string q;
+  DialogBoxParamA(GetModuleHandle(NULL), MAKEINTRESOURCEA(1002), NULL, InputDialogProc, (LPARAM)&q);
   return q;
 
 #else
@@ -248,6 +312,11 @@ std::string ShowTextInputDialog(PlatformWindow *parent, const char *title,
   std::cout << "> ";
   std::string q;
   std::getline(std::cin >> std::ws, q);
+  return q;
+
+#elif defined(_WIN32)
+  std::string q = default_value ? default_value : "";
+  DialogBoxParamA(GetModuleHandle(NULL), MAKEINTRESOURCEA(1003), NULL, InputDialogProc, (LPARAM)&q);
   return q;
 
 #else

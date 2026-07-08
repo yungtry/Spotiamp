@@ -533,6 +533,13 @@ Bitmap *PlatformLoadBitmapFromBuf(const void *data, size_t data_size) {
   SDL_RWops *rw = SDL_RWFromConstMem(data, data_size);
   if (!rw) return NULL;
   SDL_Surface *surf = SDL_LoadBMP_RW(rw, 1);
+  if (surf) {
+    SDL_Surface *converted = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ARGB8888, 0);
+    if (converted) {
+      SDL_FreeSurface(surf);
+      surf = converted;
+    }
+  }
   return (Bitmap*)surf;
 }
 
@@ -593,10 +600,24 @@ bool PlatformLoadBitmap(Bitmap **bitmap, const char *name) {
     std::replace(path.begin(), path.end(), '\\', '/');
     #endif
     *bitmap = (Bitmap*)SDL_LoadBMP(path.c_str());
+    if (*bitmap) {
+      SDL_Surface *converted = SDL_ConvertSurfaceFormat((SDL_Surface*)*bitmap, SDL_PIXELFORMAT_ARGB8888, 0);
+      if (converted) {
+        SDL_FreeSurface((SDL_Surface*)*bitmap);
+        *bitmap = (Bitmap*)converted;
+      }
+    }
   }
   if (!*bitmap) {
     std::string path = std::string("skin/") + name;
     *bitmap = (Bitmap*)SDL_LoadBMP(path.c_str());
+    if (*bitmap) {
+      SDL_Surface *converted = SDL_ConvertSurfaceFormat((SDL_Surface*)*bitmap, SDL_PIXELFORMAT_ARGB8888, 0);
+      if (converted) {
+        SDL_FreeSurface((SDL_Surface*)*bitmap);
+        *bitmap = (Bitmap*)converted;
+      }
+    }
   }
   if (*bitmap && strcmp(name, "text.bmp") == 0) {
     PlatformPostProcessTextBitmap(*bitmap);
