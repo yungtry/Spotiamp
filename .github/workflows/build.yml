@@ -20,11 +20,13 @@ jobs:
             artifact: spotiamp-windows
             executable: spotiamp.exe
             binary: build/app/Release/spotiamp.exe
+            toolchain: build/conan/build/generators/conan_toolchain.cmake
           - name: macOS
             os: macos-15
             artifact: spotiamp-macos
             executable: spotiamp
             binary: build/app/spotiamp
+            toolchain: build/conan/build/Release/generators/conan_toolchain.cmake
 
     env:
       SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
@@ -58,7 +60,7 @@ jobs:
         run: >-
           cmake -S . -B build/app
           "-DCMAKE_BUILD_TYPE=Release"
-          "-DCMAKE_TOOLCHAIN_FILE=build/conan/build/Release/generators/conan_toolchain.cmake"
+          "-DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }}"
 
       - name: Build
         run: cmake --build build/app --config Release --parallel
