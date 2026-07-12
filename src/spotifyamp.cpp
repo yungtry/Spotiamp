@@ -278,6 +278,7 @@ MainWindow::MainWindow() {
   compact_ = true;
   stereo_ = true;
   in_dialog_ = false;
+  login_in_progress_ = false;
   connect_error_ = false;
   global_hotkeys_ = false;
   coverart_visible_ = false;
@@ -294,8 +295,6 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() {
 
 }
-
-void MainWindow::InitThreading() {}
 
 bool GetMachineId(char buf[64]);
 
@@ -400,20 +399,6 @@ void TspDprintf(const char *s, ...) {
 }
 #endif
 
-// This is called on the disk thread, to notify the main thread that there are pending
-// disk events.
-static void FileIOThreadNotify(void *user_data) {
-#ifndef WITH_SDL
-  MainWindow *mw = (MainWindow *)user_data;
-  mw->NotifyIOEvents();
-#endif
-}
-
-void MainWindow::PumpIOEvents() {
-//  TspOs *os = TspGetOs(tsp_);
-//  os->PumpIOEvents(os);
-}
-
 bool MainWindow::Load() {
 #ifndef _DEBUG
    CheckUpdate();
@@ -443,8 +428,6 @@ bool MainWindow::Load() {
   }
 
 //  TspOs *os = TspGetOs(tsp_);
-//  os->EnableFileIOMultithreading(os, &FileIOThreadNotify, this);
-  
   item_list_ = TspItemListCreate(tsp_, limits.track_player_size);
   player_list_ = TspPlayerGetItemList(tsp_);
   
@@ -454,9 +437,6 @@ bool MainWindow::Load() {
 
   WavInit(tsp_);
   TspPlayerSetVolume(tsp_, WavGetVolume());
-  InitThreading();
-  RegisterForGlobalHotkeys();
-
   bool compact = PrefReadBool(false, "compact");
   compact_ = !compact;
   SetCompact(compact);
@@ -1089,7 +1069,7 @@ void MainWindow::Perform(int cmd) {
     } break;
   case CMD_ALWAYS_ON_TOP: SetAlwaysOnTop(!always_on_top()); break;
   case CMD_COMPACT: SetCompact(!compact_); break;
-  case CMD_LOGIN: ShowLoginDialog(); break;
+  case CMD_LOGIN: StartLogin(); break;
   case CMD_TIME_TOGGLE: time_mode_ = !time_mode_; break;
   case CMD_TIME_ELAPSED:time_mode_ = false; break;
   case CMD_TIME_REMAINS:time_mode_ = true; break;
@@ -1318,7 +1298,7 @@ void MainWindow::MainLoop() {
       g_login_shown = true;
 
       if (username_.empty())
-        Login("", "");
+        StartLogin();
     }
 
     if (connect_error_) {
@@ -1326,13 +1306,13 @@ void MainWindow::MainLoop() {
       TspError error = TspGetConnectionError(tsp_);
       if (error == kTspErrorBadCredentials) {
         MsgBox("Bad username / password.", "Spotiamp", MB_ICONEXCLAMATION);
-        ShowLoginDialog();
+        StartLogin();
       } else if (error == kTspErrorPremiumRequired) {
         int r = MsgBox("You need Spotify Premium to use Spotiamp.\r\nDo you want to sign up now?", "Spotiamp", MB_ICONEXCLAMATION | MB_YESNOCANCEL);
         if (r == IDYES)
           OpenUrl("https://www.spotify.com/ca-en/premium/");
         if (r != IDCANCEL)
-          ShowLoginDialog();
+          StartLogin();
       }
     }
 
@@ -1649,14 +1629,32 @@ void MainWindow::ShowSearchDialog() {
   }
 }
 
-void MainWindow::ShowLoginDialog() {
-  Login("", "");
-}
-
-void MainWindow::Login(const char *, const char *) {
+void MainWindow::StartLogin() {
+  if (login_in_progress_)
+    return;
+  login_in_progress_ = true;
   username_.clear();
-  if (TspLogin(tsp_, "", "", kTspCredentialType_OAuth) >= 0)
-    username_ = "Spotify";
+  SetVisible(false);
+  playlist_window_->SetVisible(false);
+  eq_window_->SetVisible(false);
+  coverart_window.SetVisible(false);
+  std::thread([this]() {
+    TspError result = TspLogin(tsp_, "", "", kTspCredentialType_OAuth);
+    RunOnMainThread([this, result]() {
+      login_in_progress_ = false;
+      if (result >= 0) {
+        username_ = "Spotify";
+        SetVisible(true);
+        if (equalizer_)
+          eq_window_->SetVisible(true);
+        if (playlist_)
+          playlist_window_->SetVisible(true);
+        if (coverart_visible_)
+          coverart_window.SetVisible(true);
+        MakeActive();
+      }
+    });
+  }).detach();
 }
 
 struct HotkeyInfo {
@@ -2950,10 +2948,5 @@ PlatformWindow *InitSpotamp(int argc, char **argv) {
 
   coverart_window.SetWindowText("Album Art");
 
-  main_window.SetVisible(true);
-  if (main_window.eq_visible()) eq_window.SetVisible(true);
-  if (main_window.playlist_visible()) playlist_window.SetVisible(true);
-  if (main_window.coverart_visible()) coverart_window.SetVisible(true);
- 
   return &main_window;
 }

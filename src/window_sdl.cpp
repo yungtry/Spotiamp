@@ -420,6 +420,7 @@ void PlatformWindow::VisibleChanged() {
     SDL_ShowWindow(window_);
     surface_ = SDL_GetWindowSurface(window_);
     need_repaint_ = true;
+    PlatformPaint();
   } else {
     SDL_HideWindow(window_);
   }

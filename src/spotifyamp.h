@@ -58,7 +58,6 @@ public:
 	virtual void ScrollText();
 	virtual bool HandleAppCommandHotKeys(int cmd, int keys);
 	virtual void GlobalHotkey(int id);
-	virtual void PumpIOEvents();
 
 	void Perform(int cmd);
 
@@ -81,12 +80,11 @@ public:
 
 	void ResetScroll() { text_scroll_ = 0; text_scroll_delay_ = 5; }
 
-	void Login(const char* username, const char* password);
+	void StartLogin();
 	void SaveNowPlaying();
 
 	void ShowEjectMenu();
 	void ShowSearchDialog();
-	void ShowLoginDialog();
 	void ShowOptionsMenu();
 	void ShowVisualizeMenu();
 
@@ -102,7 +100,6 @@ public:
 public:
 	void PaintCompact();
 	void PaintFull();
-	void InitThreading();
 	void SetShoutcast(bool shoutcast);
 	void EnableGlobalHotkeys(bool enable);
 
@@ -118,6 +115,7 @@ public:
 	bool connect_error_;
 
 	bool in_dialog_;
+	bool login_in_progress_;
 	bool global_hotkeys_;
 	bool itemlist_in_sync_with_player_;
 

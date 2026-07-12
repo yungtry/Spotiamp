@@ -29,7 +29,6 @@ public:
   virtual bool HandleAppCommandHotKeys(int cmd, int keys) { return false; }
   virtual void Destroy() {}
 
-  void RegisterForGlobalHotkeys() {}
   void WindowDragableChanged() {}
   void MakeActive();
 

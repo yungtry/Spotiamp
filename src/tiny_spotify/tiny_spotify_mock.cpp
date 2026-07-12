@@ -65,7 +65,6 @@ struct Tsp {
   void *audio_context;
   
   std::string access_token;
-  std::string username;
   
   bool connected;
   TspError connection_error;
@@ -853,7 +852,8 @@ static std::string CallbackQueryParameter(const std::string &request, const std:
   return "";
 }
 
-static std::string ListenForAuthCode(const std::string &expected_state) {
+static std::string ListenForAuthCode(const std::string &expected_state,
+                                     const std::string &auth_url) {
   if (!EnsureSocketLayer()) return "";
   SocketHandle server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd == kInvalidSocket) return "";
@@ -876,6 +876,10 @@ static std::string ListenForAuthCode(const std::string &expected_state) {
     CloseSocketHandle(server_fd);
     return "";
   }
+
+  // SDL browser integration must run on the UI thread. Queue it only after the
+  // callback socket is listening so a fast browser redirect cannot race bind().
+  RunOnMainThread([auth_url]() { OpenUrl(auth_url.c_str()); });
   
   std::cout << "\n========================================================" << std::endl;
   std::cout << "Waiting for Spotify authorization redirect (Timeout 60s)..." << std::endl;
@@ -1730,9 +1734,7 @@ static std::string ExtractSpotifyUri(const std::string &json, const std::string 
 }
 
 // Playback bridge control
-static void SpawnLibrespot(const char *user, const char *pass, const char *token) {
-  (void)user;
-  (void)pass;
+static void SpawnLibrespot(const char *token) {
   char err_buf[1024] = {0};
   int rc = sp_playback_bridge_start(token, NULL, err_buf, sizeof(err_buf));
   if (rc != 0) {
@@ -2364,7 +2366,6 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *, const char *, int) {
   
   KillLibrespot();
   
-  tsp->username = "Spotify";
   std::string access_token = "";
   std::string refresh_token = "";
   
@@ -2407,9 +2408,7 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *, const char *, int) {
                            "&scope=user-modify-playback-state%20user-read-playback-state%20user-read-currently-playing%20user-library-read%20user-top-read%20playlist-read-private%20playlist-read-collaborative";
     
     std::cout << "Opening browser for Spotify authentication..." << std::endl;
-    OpenUrl(auth_url.c_str());
-    
-    std::string code = ListenForAuthCode(oauth_state);
+    std::string code = ListenForAuthCode(oauth_state, auth_url);
     if (code.empty()) {
       tsp->connection_error = kTspErrorTemp;
       return kTspErrorTemp;
@@ -2431,7 +2430,7 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *, const char *, int) {
   tsp->access_token = access_token;
   
   // Spawn librespot Connect player daemon using access token
-  SpawnLibrespot(NULL, NULL, access_token.c_str());
+  SpawnLibrespot(access_token.c_str());
   
   tsp->connected = true;
   tsp->connection_error = kTspErrorOk;
