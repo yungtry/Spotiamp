@@ -4,7 +4,6 @@
 #include "stdafx.h"
 #include "SDL.h"
 #include "window.h"
-#include <dirent.h>
 #include <functional>
 
 typedef SDL_Window *WindowHandle;
@@ -113,7 +112,7 @@ public:
   char *filename() const;
 
 private:
-  DIR *dir_;
+  void *platform_data_;
   char directory_[MAX_PATH];
   char filename_[MAX_PATH];
   bool current_is_dir_;

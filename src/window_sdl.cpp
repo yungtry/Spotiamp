@@ -10,6 +10,14 @@
 #include <algorithm>
 #include <sys/stat.h>
 #include "zipfile.h"
+#if defined(_WIN32)
+#include <windows.h>
+#undef DrawText
+#undef GetWindowText
+#undef SetWindowText
+#else
+#include <dirent.h>
+#endif
 
 static ZipFile *current_skin_zip = NULL;
 static std::string current_skin_basedir;
@@ -771,28 +779,82 @@ bool PlatformWriteClipboard(const char *text) {
   return SDL_SetClipboardText(text) == 0;
 }
 
-FileEnumerator::FileEnumerator(const char *directory) {
+namespace {
+#if defined(_WIN32)
+struct FileEnumeratorData {
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WIN32_FIND_DATAA entry{};
+  bool first_pending = false;
+};
+#else
+struct FileEnumeratorData {
+  DIR *dir = NULL;
+};
+#endif
+}
+
+FileEnumerator::FileEnumerator(const char *directory) : platform_data_(NULL) {
   strncpy(directory_, directory ? directory : "", sizeof(directory_) - 1);
   directory_[sizeof(directory_) - 1] = 0;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+  FileEnumeratorData *data = new FileEnumeratorData();
+  std::string pattern = directory_;
+  if (!pattern.empty() && pattern.back() != '/' && pattern.back() != '\\')
+    pattern += '\\';
+  pattern += '*';
+  data->handle = FindFirstFileA(pattern.c_str(), &data->entry);
+  data->first_pending = data->handle != INVALID_HANDLE_VALUE;
+  platform_data_ = data;
+#else
   std::replace(directory_, directory_ + strlen(directory_), '\\', '/');
+  FileEnumeratorData *data = new FileEnumeratorData();
+  data->dir = opendir(directory_);
+  platform_data_ = data;
 #endif
-  dir_ = opendir(directory_);
   filename_[0] = 0;
   current_is_dir_ = false;
 }
 
 FileEnumerator::~FileEnumerator() {
-  if (dir_)
-    closedir(dir_);
+  FileEnumeratorData *data = static_cast<FileEnumeratorData *>(platform_data_);
+  if (!data)
+    return;
+#if defined(_WIN32)
+  if (data->handle != INVALID_HANDLE_VALUE)
+    FindClose(data->handle);
+#else
+  if (data->dir)
+    closedir(data->dir);
+#endif
+  delete data;
 }
 
 bool FileEnumerator::Next() {
-  if (!dir_)
+  FileEnumeratorData *data = static_cast<FileEnumeratorData *>(platform_data_);
+  if (!data)
     return false;
 
+#if defined(_WIN32)
+  if (data->handle == INVALID_HANDLE_VALUE)
+    return false;
+  for (;;) {
+    if (data->first_pending) {
+      data->first_pending = false;
+    } else if (!FindNextFileA(data->handle, &data->entry)) {
+      return false;
+    }
+    if (data->entry.cFileName[0] == '.')
+      continue;
+    strncpy(filename_, data->entry.cFileName, sizeof(filename_) - 1);
+    filename_[sizeof(filename_) - 1] = 0;
+    current_is_dir_ = (data->entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return true;
+  }
+#else
+  if (!data->dir)
+    return false;
   struct dirent *entry = NULL;
-  while ((entry = readdir(dir_)) != NULL) {
+  while ((entry = readdir(data->dir)) != NULL) {
     if (entry->d_name[0] == '.')
       continue;
 
@@ -807,6 +869,7 @@ bool FileEnumerator::Next() {
   }
 
   return false;
+#endif
 }
 
 bool FileEnumerator::is_directory() const {
