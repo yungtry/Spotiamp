@@ -448,15 +448,6 @@ bool MainWindow::Load() {
   item_list_ = TspItemListCreate(tsp_, limits.track_player_size);
   player_list_ = TspPlayerGetItemList(tsp_);
   
-  char *username = strdup(PrefReadStr("", "username"));
-  if (*username) {
-    const char *password = PrefReadStr("", "password");
-    if (*password &&
-        TspLogin(tsp_, username, password, kTspCredentialType_Token) >= 0)
-      username_ = username;
-  }
-  free(username);
-
   TspSetDisplayName(tsp_, "Spotiamp");
   TspSetAudioCallback(tsp_, &MyWavPush, NULL);
   TspPlayerSetDevice(tsp_, kTspDeviceIdAuto, 0);
@@ -1327,7 +1318,7 @@ void MainWindow::MainLoop() {
       g_login_shown = true;
 
       if (username_.empty())
-        ShowLoginDialog();
+        Login("", "");
     }
 
     if (connect_error_) {
@@ -1554,7 +1545,7 @@ void MainWindow::ShowOptionsMenu() {
   bool repeat = TspPlayerGetRepeat(tsp_) != 0;
   bool shuffle = TspPlayerGetShuffle(tsp_) != 0;
 
-  menu.AddItem(CMD_LOGIN, username_.empty() ? "Login...\tCtrl+L" : ("Log Out " + username_ + "...\tCtrl+L").c_str());
+  menu.AddItem(CMD_LOGIN, username_.empty() ? "Login with Spotify...\tCtrl+L" : "Reconnect Spotify...\tCtrl+L");
   menu.AddSeparator();
 
   menu.BeginSubMenu();
@@ -1659,20 +1650,13 @@ void MainWindow::ShowSearchDialog() {
 }
 
 void MainWindow::ShowLoginDialog() {
-  std::string username = username_;
-  std::string password;
-  if (::ShowLoginDialog(this, &username, &password)) {
-    Login(username.c_str(), password.c_str());
-  }
+  Login("", "");
 }
 
-void MainWindow::Login(const char *username, const char *password) {
+void MainWindow::Login(const char *, const char *) {
   username_.clear();
-  if (TspLogin(tsp_, username, password, kTspCredentialType_Password) >= 0) {
-    PrefWriteStr("", "username");
-    if (*username)
-      username_ = username;
-  }
+  if (TspLogin(tsp_, "", "", kTspCredentialType_OAuth) >= 0)
+    username_ = "Spotify";
 }
 
 struct HotkeyInfo {
@@ -2156,20 +2140,12 @@ void PlaylistWindow::ShowRightClickMenu() {
 }
 
 static std::string ConvertToPlayUri(const char *s) {
-  char buf[128], *d, c;
-  buf[0] = 0;
-  if (memcmp(s, "spotify:", 8) == 0) {
-    s += 8;
-    strcpy(buf, "https://play.spotify.com/");
-    d = buf + sizeof("https://play.spotify.com/") - 1;
-    for(;;) {
-      c = *s++;
-      if (c == ':') c = '/';
-      *d++ = c;
-      if (c == 0) break;
-    }
-  }
-  return buf;
+  if (!s || strncmp(s, "spotify:", 8) != 0)
+    return std::string();
+  std::string result = "https://play.spotify.com/";
+  for (s += 8; *s; ++s)
+    result.push_back(*s == ':' ? '/' : *s);
+  return result;
 }
 
 void PlaylistWindow::Perform(int cmd) {
@@ -2905,12 +2881,6 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
     MainWindow *w = (MainWindow*)context;
     if (event == kTspCallbackEvent_Connected) {
       w->connect_error_ = false;
-
-      char token[1024];
-      if (!w->username_.empty() && TspGetCredentialToken(w->tsp_, token, sizeof(token)) == 0) {
-        PrefWriteStr(w->username_.c_str(), "username");
-        PrefWriteStr(token, "password");
-      }
 
     } else if (event == kTspCallbackEvent_AutoComplete) {
       AutoCompleteCopy();

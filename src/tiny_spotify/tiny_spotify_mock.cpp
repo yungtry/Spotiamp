@@ -1,5 +1,6 @@
 #include "tiny_spotify.h"
 #include "playback_bridge.h"
+#include "window.h"
 #include <string>
 #include <curl/curl.h>
 #include <vector>
@@ -7,7 +8,10 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <array>
+#include <cstdint>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <time.h>
 #include <stdio.h>
@@ -15,7 +19,9 @@
 #include <string.h>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -585,7 +591,7 @@ static int PickNextIndex(Tsp *tsp, int direction) {
 }
 
 // Spotify API credentials — loaded from obfuscated build-time generated header.
-// Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars before building.
+// Set SPOTIFY_CLIENT_ID before building.
 #include "credentials.h"
 
 // Paste your Spotify Access Token here for quick local testing.
@@ -680,59 +686,174 @@ static long LastHttpStatus() {
   return g_last_http_status;
 }
 
-// Base64 helper
-static std::string Base64Encode(const std::string &in) {
-  static const char* b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out = "";
-  int val = 0, valb = -6;
-  for (unsigned char c : in) {
-    val = (val << 8) + c;
-    valb += 8;
-    while (valb >= 0) {
-      out.push_back(b64_chars[(val >> valb) & 0x3F]);
-      valb -= 6;
+static uint32_t RotateRight(uint32_t value, unsigned bits) {
+  return (value >> bits) | (value << (32 - bits));
+}
+
+static std::array<unsigned char, 32> Sha256(const std::string &input) {
+  static const uint32_t k[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  };
+  std::vector<unsigned char> data(input.begin(), input.end());
+  uint64_t bit_length = static_cast<uint64_t>(data.size()) * 8;
+  data.push_back(0x80);
+  while ((data.size() % 64) != 56) data.push_back(0);
+  for (int i = 7; i >= 0; --i) data.push_back(static_cast<unsigned char>(bit_length >> (i * 8)));
+
+  uint32_t h[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+  for (size_t offset = 0; offset < data.size(); offset += 64) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i) {
+      size_t p = offset + i * 4;
+      w[i] = (uint32_t(data[p]) << 24) | (uint32_t(data[p + 1]) << 16) |
+             (uint32_t(data[p + 2]) << 8) | uint32_t(data[p + 3]);
     }
+    for (int i = 16; i < 64; ++i) {
+      uint32_t s0 = RotateRight(w[i - 15], 7) ^ RotateRight(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      uint32_t s1 = RotateRight(w[i - 2], 17) ^ RotateRight(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+    for (int i = 0; i < 64; ++i) {
+      uint32_t s1 = RotateRight(e, 6) ^ RotateRight(e, 11) ^ RotateRight(e, 25);
+      uint32_t ch = (e & f) ^ (~e & g);
+      uint32_t temp1 = hh + s1 + ch + k[i] + w[i];
+      uint32_t s0 = RotateRight(a, 2) ^ RotateRight(a, 13) ^ RotateRight(a, 22);
+      uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t temp2 = s0 + maj;
+      hh=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+    }
+    h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
   }
-  if (valb > -6) out.push_back(b64_chars[((val << 8) >> (valb + 8)) & 0x3F]);
-  while (out.size() % 4) out.push_back('=');
+  std::array<unsigned char, 32> digest{};
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 4; ++j)
+      digest[i * 4 + j] = static_cast<unsigned char>(h[i] >> (24 - j * 8));
+  return digest;
+}
+
+static std::string Base64UrlEncode(const unsigned char *data, size_t size) {
+  static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  std::string out;
+  unsigned value = 0;
+  int bits = -6;
+  for (size_t i = 0; i < size; ++i) {
+    value = (value << 8) | data[i];
+    bits += 8;
+    while (bits >= 0) { out.push_back(chars[(value >> bits) & 63]); bits -= 6; }
+  }
+  if (bits > -6) out.push_back(chars[((value << 8) >> (bits + 8)) & 63]);
   return out;
 }
 
-static std::string GetAccessTokenFromCode(const std::string &code, const std::string &client_id, const std::string &client_secret) {
-  std::string base64_auth = Base64Encode(client_id + ":" + client_secret);
-  std::string cmd = "curl -s --max-time 10 --connect-timeout 5 -X POST https://accounts.spotify.com/api/token "
-                    "-H \"Authorization: Basic " + base64_auth + "\" "
-                    "-H \"Content-Type: application/x-www-form-urlencoded\" "
-                    "-d \"grant_type=authorization_code&code=" + code + "&redirect_uri=http://127.0.0.1:3000/callback\"";
-  FILE *pipe = popen(cmd.c_str(), "r");
-  if (!pipe) return "";
-  char buffer[1024];
-  std::string result = "";
-  while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-    result += buffer;
-  }
-  pclose(pipe);
-  return result;
+static std::string GenerateCodeVerifier() {
+  static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  std::random_device random;
+  std::uniform_int_distribution<size_t> pick(0, sizeof(chars) - 2);
+  std::string verifier(64, ' ');
+  for (char &c : verifier) c = chars[pick(random)];
+  return verifier;
 }
 
-static std::string RefreshAccessToken(const std::string &refresh_token, const std::string &client_id, const std::string &client_secret) {
-  std::string base64_auth = Base64Encode(client_id + ":" + client_secret);
-  std::string cmd = "curl -s --max-time 10 --connect-timeout 5 -X POST https://accounts.spotify.com/api/token "
-                    "-H \"Authorization: Basic " + base64_auth + "\" "
-                    "-H \"Content-Type: application/x-www-form-urlencoded\" "
-                    "-d \"grant_type=refresh_token&refresh_token=" + refresh_token + "\"";
-  FILE *pipe = popen(cmd.c_str(), "r");
-  if (!pipe) return "";
-  char buffer[1024];
-  std::string result = "";
-  while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-    result += buffer;
+static std::string FormEncode(const std::string &value) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : value) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%'); out.push_back(hex[c >> 4]); out.push_back(hex[c & 15]);
+    }
   }
-  pclose(pipe);
-  return result;
+  return out;
 }
 
-static std::string ListenForAuthCode() {
+static std::string TokenRequest(const std::string &form_data) {
+  curl_global_init(CURL_GLOBAL_DEFAULT);
+  CURL *curl = curl_easy_init();
+  if (!curl) return "";
+  std::string response;
+  struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/x-www-form-urlencoded");
+  curl_easy_setopt(curl, CURLOPT_URL, "https://accounts.spotify.com/api/token");
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form_data.c_str());
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(form_data.size()));
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+  CURLcode result = curl_easy_perform(curl);
+  curl_slist_free_all(headers);
+  curl_easy_cleanup(curl);
+  return result == CURLE_OK ? response : "";
+}
+
+static std::string GetAccessTokenFromCode(const std::string &code, const std::string &client_id,
+                                          const std::string &code_verifier) {
+  return TokenRequest("client_id=" + FormEncode(client_id) +
+                      "&grant_type=authorization_code&code=" + FormEncode(code) +
+                      "&redirect_uri=" + FormEncode("http://127.0.0.1:3000/callback") +
+                      "&code_verifier=" + FormEncode(code_verifier));
+}
+
+static std::string RefreshAccessToken(const std::string &refresh_token, const std::string &client_id) {
+  return TokenRequest("client_id=" + FormEncode(client_id) +
+                      "&grant_type=refresh_token&refresh_token=" + FormEncode(refresh_token));
+}
+
+static int HexDigitValue(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static std::string FormDecode(const std::string &value) {
+  std::string out;
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (value[i] == '%' && i + 2 < value.size()) {
+      int high = HexDigitValue(value[i + 1]);
+      int low = HexDigitValue(value[i + 2]);
+      if (high >= 0 && low >= 0) {
+        out.push_back(static_cast<char>((high << 4) | low));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(value[i] == '+' ? ' ' : value[i]);
+  }
+  return out;
+}
+
+static std::string CallbackQueryParameter(const std::string &request, const std::string &name) {
+  size_t target_start = request.find(' ');
+  if (target_start == std::string::npos) return "";
+  size_t target_end = request.find(' ', ++target_start);
+  if (target_end == std::string::npos) return "";
+  std::string target = request.substr(target_start, target_end - target_start);
+  if (target.rfind("/callback?", 0) != 0) return "";
+  std::string query = target.substr(10);
+  for (size_t start = 0; start <= query.size();) {
+    size_t end = query.find('&', start);
+    std::string field = query.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    size_t equals = field.find('=');
+    if (equals != std::string::npos && FormDecode(field.substr(0, equals)) == name)
+      return FormDecode(field.substr(equals + 1));
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return "";
+}
+
+static std::string ListenForAuthCode(const std::string &expected_state) {
   if (!EnsureSocketLayer()) return "";
   SocketHandle server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd == kInvalidSocket) return "";
@@ -743,7 +864,7 @@ static std::string ListenForAuthCode() {
   struct sockaddr_in address;
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(3000);
   
   if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
@@ -791,19 +912,18 @@ static std::string ListenForAuthCode() {
     buffer[bytes_read] = '\0';
     std::string request(buffer);
     
-    size_t code_pos = request.find("code=");
-    if (code_pos != std::string::npos) {
-      size_t space_pos = request.find(" ", code_pos);
-      size_t amp_pos = request.find("&", code_pos);
-      size_t end_pos = (amp_pos != std::string::npos && amp_pos < space_pos) ? amp_pos : space_pos;
-      code = request.substr(code_pos + 5, end_pos - code_pos - 5);
-    }
+    std::string returned_state = CallbackQueryParameter(request, "state");
+    if (!expected_state.empty() && returned_state == expected_state)
+      code = CallbackQueryParameter(request, "code");
+    bool authorized = !code.empty();
     
-    std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+    std::string response = std::string(authorized ? "HTTP/1.1 200 OK" : "HTTP/1.1 400 Bad Request") +
+                           "\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
                            "<html><head><title>Spotiamp</title></head>"
                            "<body style=\"font-family: sans-serif; text-align: center; margin-top: 50px;\">"
-                           "<h2>Spotiamp Authorized Successfully!</h2>"
-                           "<p>You can close this tab and return to the Spotiamp application.</p>"
+                           + std::string(authorized ? "<h2>Spotiamp authorized successfully.</h2>"
+                                                    : "<h2>Authorization request rejected.</h2>") +
+                           "<p>You can close this tab and return to Spotiamp.</p>"
                            "</body></html>";
     SocketWrite(client_fd, response.c_str(), (int)response.length());
   }
@@ -2239,55 +2359,64 @@ TSP_PUBLIC void TspItemListSetRadioTracks(TspItemList *tl) {
   }
 }
 
-TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *username, const char *password, int flags) {
+TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *, const char *, int) {
   if (!tsp) return kTspErrorTemp;
   
   KillLibrespot();
   
-  tsp->username = username ? username : "";
+  tsp->username = "Spotify";
   std::string access_token = "";
   std::string refresh_token = "";
   
-  // Try to load refresh token from file
-  std::ifstream infile("refresh_token.txt");
-  if (infile.is_open()) {
-    std::getline(infile, refresh_token);
-    infile.close();
-    refresh_token = Trim(refresh_token);
+  // OAuth is the sole login mechanism. Keep its long-lived credential alongside
+  // the rest of Spotiamp's preferences rather than depending on the working dir.
+  refresh_token = Trim(PrefReadStr("", "spotify.refresh_token"));
+
+  // Migrate builds that stored the token in the working directory.
+  if (refresh_token.empty()) {
+    std::ifstream infile("refresh_token.txt");
+    if (infile.is_open()) {
+      std::getline(infile, refresh_token);
+      refresh_token = Trim(refresh_token);
+      if (!refresh_token.empty())
+        PrefWriteStr(refresh_token.c_str(), "spotify.refresh_token");
+    }
   }
   
   if (!refresh_token.empty()) {
     std::cout << "Refreshing Spotify access token..." << std::endl;
-    std::string response = RefreshAccessToken(refresh_token, GetSpotifyClientId(), GetSpotifyClientSecret());
+    std::string response = RefreshAccessToken(refresh_token, GetSpotifyClientId());
     access_token = JsonExtractString(response, "access_token");
     std::string new_refresh = JsonExtractString(response, "refresh_token");
     if (!new_refresh.empty()) {
       refresh_token = new_refresh;
-      std::ofstream outfile("refresh_token.txt");
-      if (outfile.is_open()) {
-        outfile << refresh_token;
-        outfile.close();
-      }
+      PrefWriteStr(refresh_token.c_str(), "spotify.refresh_token");
     }
   }
   
   // If refresh failed or no refresh token, perform browser authorization flow
   if (access_token.empty()) {
+    std::string code_verifier = GenerateCodeVerifier();
+    std::string oauth_state = GenerateCodeVerifier();
+    std::array<unsigned char, 32> challenge_hash = Sha256(code_verifier);
+    std::string code_challenge = Base64UrlEncode(challenge_hash.data(), challenge_hash.size());
     std::string auth_url = "https://accounts.spotify.com/authorize?client_id=" + GetSpotifyClientId() +
                            "&response_type=code&redirect_uri=http://127.0.0.1:3000/callback" +
+                           "&code_challenge_method=S256&code_challenge=" + code_challenge +
+                           "&state=" + FormEncode(oauth_state) +
                            "&scope=user-modify-playback-state%20user-read-playback-state%20user-read-currently-playing%20user-library-read%20user-top-read%20playlist-read-private%20playlist-read-collaborative";
     
     std::cout << "Opening browser for Spotify authentication..." << std::endl;
     OpenUrl(auth_url.c_str());
     
-    std::string code = ListenForAuthCode();
+    std::string code = ListenForAuthCode(oauth_state);
     if (code.empty()) {
       tsp->connection_error = kTspErrorTemp;
       return kTspErrorTemp;
     }
     
     std::cout << "Exchanging code for access tokens..." << std::endl;
-    std::string response = GetAccessTokenFromCode(code, GetSpotifyClientId(), GetSpotifyClientSecret());
+    std::string response = GetAccessTokenFromCode(code, GetSpotifyClientId(), code_verifier);
     access_token = JsonExtractString(response, "access_token");
     refresh_token = JsonExtractString(response, "refresh_token");
     
@@ -2296,12 +2425,7 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *username, const char *passwor
       return kTspErrorTemp;
     }
     
-    // Save refresh token to file
-    std::ofstream outfile("refresh_token.txt");
-    if (outfile.is_open()) {
-      outfile << refresh_token;
-      outfile.close();
-    }
+    PrefWriteStr(refresh_token.c_str(), "spotify.refresh_token");
   }
   
   tsp->access_token = access_token;

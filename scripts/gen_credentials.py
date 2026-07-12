@@ -2,15 +2,13 @@
 """
 gen_credentials.py  —  run at build time by CMake.
 
-Reads SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET from the environment,
-XOR-obfuscates each byte with a fixed key, and writes credentials.h into
-the build output directory.
+Writes the public Spotify client ID to credentials.h in the build directory.
 
 The obfuscation is NOT cryptographic — a determined person can still reverse
 it. The point is:
   1. The plaintext strings are not trivially grep-able in the binary.
-  2. The secrets are never stored in source control (they come from env vars).
-  3. Each developer uses their own Spotify app credentials.
+  2. Generated build configuration stays out of source control.
+  3. Each developer uses their own Spotify app client ID.
 
 Usage (called automatically by CMake):
   python3 scripts/gen_credentials.py <output_dir>
@@ -31,32 +29,27 @@ def fmt_bytes(data: list[int]) -> str:
 
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: gen_credentials.py <output_dir> <client_id> <client_secret>", file=sys.stderr)
+    if len(sys.argv) < 3:
+        print("Usage: gen_credentials.py <output_dir> <client_id>", file=sys.stderr)
         sys.exit(1)
 
     output_dir    = sys.argv[1]
     client_id     = sys.argv[2]
-    client_secret = sys.argv[3]
-
-    if not client_id or not client_secret:
+    if not client_id:
         print(
             "\n"
-            "  ERROR: SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set as\n"
-            "  environment variables before running cmake.\n"
+            "  ERROR: SPOTIFY_CLIENT_ID must be set before running cmake.\n"
             "\n"
             "  Register a free app at https://developer.spotify.com/dashboard,\n"
             "  then set the redirect URI to  http://127.0.0.1:3000/callback\n"
             "\n"
             "  export SPOTIFY_CLIENT_ID=your_client_id\n"
-            "  export SPOTIFY_CLIENT_SECRET=your_client_secret\n"
             "  cmake -B build && cmake --build build\n",
             file=sys.stderr,
         )
         sys.exit(1)
 
     id_bytes  = obfuscate(client_id)
-    sec_bytes = obfuscate(client_secret)
 
     header = f"""\
 // AUTO-GENERATED — do not edit.
@@ -69,8 +62,7 @@ def main():
 // XOR key used during obfuscation
 static constexpr unsigned char CRED_XOR_KEY = 0x{XOR_KEY:02X};
 
-static const unsigned char SPOTIFY_CLIENT_ID_OBF[]     = {{ {fmt_bytes(id_bytes)} }};
-static const unsigned char SPOTIFY_CLIENT_SECRET_OBF[] = {{ {fmt_bytes(sec_bytes)} }};
+static const unsigned char SPOTIFY_CLIENT_ID_OBF[] = {{ {fmt_bytes(id_bytes)} }};
 
 // Deobfuscates an obfuscated credential array into a std::string at runtime.
 inline std::string DeobfuscateCredential(const unsigned char *data, size_t len) {{
@@ -84,9 +76,6 @@ inline std::string GetSpotifyClientId() {{
     return DeobfuscateCredential(SPOTIFY_CLIENT_ID_OBF, sizeof(SPOTIFY_CLIENT_ID_OBF));
 }}
 
-inline std::string GetSpotifyClientSecret() {{
-    return DeobfuscateCredential(SPOTIFY_CLIENT_SECRET_OBF, sizeof(SPOTIFY_CLIENT_SECRET_OBF));
-}}
 """
 
     os.makedirs(output_dir, exist_ok=True)

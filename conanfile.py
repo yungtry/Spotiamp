@@ -17,8 +17,15 @@ class SpotiampConan(ConanFile):
     default_options = {
         "sdl/*:shared": False,
         "libcurl/*:shared": False,
-        "libcurl/*:with_ssl": "schannel",
     }
+
+    def configure(self):
+        if self.settings.os == "Windows":
+            self.options["libcurl"].with_ssl = "schannel"
+        elif self.settings.os == "Macos":
+            self.options["libcurl"].with_ssl = "secure_transport"
+        else:
+            self.options["libcurl"].with_ssl = "openssl"
 
     def layout(self):
         cmake_layout(self)

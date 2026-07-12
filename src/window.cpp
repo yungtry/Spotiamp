@@ -537,6 +537,9 @@ static void WritePrefs(const std::map<std::string, std::string> &prefs) {
     fprintf(f, "%s=%s\n", it.first.c_str(), it.second.c_str());
   }
   fclose(f);
+#ifndef _WIN32
+  chmod(inifile, 0600);
+#endif
 }
 
 void PrefInit() {
@@ -565,6 +568,9 @@ void PrefInit() {
   FILE *f = fopen(inifile, "ab");
   if (f) {
     fclose(f);
+#ifndef _WIN32
+    chmod(inifile, 0600);
+#endif
     if (!had_new_ini && local_ini != inifile && FileExists(local_ini))
       CopyFileContents(local_ini, inifile);
   } else {

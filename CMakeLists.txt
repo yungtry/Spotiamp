@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(spotiamp LANGUAGES C CXX)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -11,7 +13,6 @@ set(SPOTIAMP_CARGO_TARGET "" CACHE STRING "Optional Cargo target triple for the 
 # Credentials — generated at configure time from environment variables.
 # Never stored in source control. Set before running cmake:
 #   export SPOTIFY_CLIENT_ID=...
-#   export SPOTIFY_CLIENT_SECRET=...
 #   cmake -B build && cmake --build build
 # ---------------------------------------------------------------------------
 set(CREDENTIALS_DIR "${CMAKE_BINARY_DIR}/generated")
@@ -20,18 +21,16 @@ set(SRC_DIR         "${CMAKE_SOURCE_DIR}/src")
 
 # Read env vars at configure time
 set(SPOTIAMP_CLIENT_ID     "$ENV{SPOTIFY_CLIENT_ID}")
-set(SPOTIAMP_CLIENT_SECRET "$ENV{SPOTIFY_CLIENT_SECRET}")
 
-if("${SPOTIAMP_CLIENT_ID}" STREQUAL "" OR "${SPOTIAMP_CLIENT_SECRET}" STREQUAL "")
+if("${SPOTIAMP_CLIENT_ID}" STREQUAL "")
   if(EXISTS "${CREDENTIALS_H}")
     message(STATUS "Using existing generated Spotify credentials header")
   else()
     message(FATAL_ERROR
-      "\nSPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set before running cmake.\n"
+      "\nSPOTIFY_CLIENT_ID must be set before running cmake.\n"
       "Register an app at https://developer.spotify.com/dashboard\n"
       "Set redirect URI to http://127.0.0.1:3000/callback, then:\n"
       "  export SPOTIFY_CLIENT_ID=your_client_id\n"
-      "  export SPOTIFY_CLIENT_SECRET=your_client_secret\n"
       "  cmake -B build && cmake --build build\n"
     )
   endif()
@@ -39,10 +38,9 @@ else()
   # Run the Python script now, at configure time, passing credentials as args
   # so they never need to be in the environment at build time.
   execute_process(
-    COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/gen_credentials.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/gen_credentials.py"
             "${CREDENTIALS_DIR}"
             "${SPOTIAMP_CLIENT_ID}"
-            "${SPOTIAMP_CLIENT_SECRET}"
     RESULT_VARIABLE CRED_RESULT
     OUTPUT_VARIABLE CRED_OUTPUT
     ERROR_VARIABLE  CRED_ERROR
@@ -123,19 +121,29 @@ if(WIN32)
         ${SRC_DIR}/icon.ico
     )
     list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv)
+    if(MINGW)
+        # MinGW's startup library must precede SDL2main so its WinMain
+        # reference is resolved from SDL's entry-point shim.
+        list(PREPEND SPOTIAMP_PLATFORM_LIBS mingw32)
+    endif()
 endif()
 
 add_executable(spotiamp WIN32 ${SPOTIAMP_SRCS})
 
 target_compile_definitions(spotiamp PRIVATE WITH_SDL)
 
+if(CARGO_EXECUTABLE AND NOT EXISTS "${CARGO_EXECUTABLE}")
+    unset(CARGO_EXECUTABLE CACHE)
+endif()
 find_program(CARGO_EXECUTABLE cargo)
 if(NOT CARGO_EXECUTABLE)
     message(FATAL_ERROR "Cargo is required to build the Rust playback bridge")
 endif()
 set(RUST_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/playback/librespot_bridge")
 set(RUST_BRIDGE_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+set(SPOTIAMP_RUST_PROFILE "Release" CACHE STRING "Rust playback bridge profile (Debug or Release)")
+set_property(CACHE SPOTIAMP_RUST_PROFILE PROPERTY STRINGS Debug Release)
+if(SPOTIAMP_RUST_PROFILE STREQUAL "Debug")
     set(RUST_BRIDGE_PROFILE "debug")
     set(RUST_BRIDGE_PROFILE_ARGS "")
 else()
@@ -162,6 +170,7 @@ add_custom_command(
     OUTPUT "${RUST_BRIDGE_LIB}"
     COMMAND ${CMAKE_COMMAND} -E env
             "CARGO_TARGET_DIR=${RUST_BRIDGE_TARGET_DIR}"
+            "MAKEFLAGS="
             "${CARGO_EXECUTABLE}" build
             --manifest-path "${RUST_BRIDGE_DIR}/Cargo.toml"
             ${RUST_BRIDGE_PROFILE_ARGS}
@@ -222,10 +231,8 @@ add_custom_command(TARGET spotiamp POST_BUILD
 )
 
 # Linking
-if(MSVC)
-    set_property(TARGET spotiamp APPEND PROPERTY LINK_FLAGS "/NXCOMPAT:NO /SAFESEH:NO")
-elseif(MINGW)
+if(MINGW)
     target_link_options(spotiamp PRIVATE "-static" "-static-libgcc" "-static-libstdc++")
 endif()
 
-target_link_libraries(spotiamp PRIVATE ${SPOTIAMP_SDL_LIBS} ${SPOTIAMP_PLATFORM_LIBS} ${SPOTIAMP_CURL_LIBS})
+target_link_libraries(spotiamp PRIVATE ${SPOTIAMP_PLATFORM_LIBS} ${SPOTIAMP_SDL_LIBS} ${SPOTIAMP_CURL_LIBS})

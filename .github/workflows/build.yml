@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: spotiamp-windows
+            executable: spotiamp.exe
+            binary: build/app/Release/spotiamp.exe
+            shell: pwsh
+          - name: macOS
+            os: macos-latest
+            artifact: spotiamp-macos
+            executable: spotiamp
+            binary: build/app/spotiamp
+            shell: bash
+
+    env:
+      SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Conan
+        shell: ${{ matrix.shell }}
+        run: python -m pip install "conan>=2,<3"
+
+      - name: Check Spotify client ID
+        shell: ${{ matrix.shell }}
+        run: python -c "import os, sys; sys.exit(0) if os.environ.get('SPOTIFY_CLIENT_ID') else sys.exit('Add SPOTIFY_CLIENT_ID as a repository Actions secret.')"
+
+      - name: Create Conan profile
+        shell: ${{ matrix.shell }}
+        run: conan profile detect --force
+
+      - name: Install native dependencies
+        shell: ${{ matrix.shell }}
+        run: >-
+          conan install .
+          -of build/conan
+          -s build_type=Release
+          --build=missing
+
+      - name: Configure
+        shell: ${{ matrix.shell }}
+        run: >-
+          cmake -S . -B build/app
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=build/conan/build/Release/generators/conan_toolchain.cmake
+
+      - name: Build
+        shell: ${{ matrix.shell }}
+        run: cmake --build build/app --config Release --parallel
+
+      - name: Stage artifact
+        shell: ${{ matrix.shell }}
+        run: |
+          cmake -E make_directory dist/Spotiamp
+          cmake -E copy "${{ matrix.binary }}" "dist/Spotiamp/${{ matrix.executable }}"
+          cmake -E copy_directory Skins dist/Spotiamp/Skins
+          cmake -E copy LICENSE dist/Spotiamp/LICENSE
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/Spotiamp
+          if-no-files-found: error
+          retention-days: 14

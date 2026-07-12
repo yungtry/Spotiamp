@@ -31,9 +31,6 @@ public:
   }
 };
 
-#pragma comment (lib, "ws2_32.lib")
-#pragma comment (lib, "sdl2.lib")
-
 static bool g_quit;
 static Point g_drag_start;
 static Point g_drag_start_global;
@@ -459,12 +456,6 @@ void PlatformWindow::BringWindowToTop() {
     SDL_RaiseWindow(window_);
 }
 
-#if defined(_MSC_VER) && defined(OS_WIN)
-extern "C" int _stdcall WinMain(int a, int b, int c, int d) {
-  SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
-  PrefInit();
-  InitSpotamp(__argc, __argv);
-#else
 #include <mutex>
 #include <vector>
 
@@ -496,7 +487,6 @@ int main(int argc, char *argv[]) {
   SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
   PrefInit();
   InitSpotamp(argc, argv);
-#endif
   
   SDL_Event event;
   while (!g_quit) {
@@ -765,13 +755,8 @@ int MsgBox(const char *message, const char *title, int flags) {
 }
 
 void OpenUrl(const char *url) {
-#if defined(__APPLE__)
-  std::string cmd = std::string("open \"") + url + "\"";
-  system(cmd.c_str());
-#elif defined(_WIN32)
-  std::string cmd = std::string("start \"\" \"") + url + "\"";
-  system(cmd.c_str());
-#endif
+  if (url && url[0] && SDL_OpenURL(url) != 0)
+    fprintf(stderr, "Could not open URL: %s\n", SDL_GetError());
 }
 
 const char *PlatformEnumAudioDevices(int i) {
@@ -1363,10 +1348,3 @@ static bool HandleActiveMenuEvent(SDL_Event *event) {
 }
 
 #endif  // defined(WITH_SDL)
-
-#ifdef _WIN32
-#include <windows.h>
-int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmdshow) {
-    return main(__argc, __argv);
-}
-#endif

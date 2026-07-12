@@ -11,86 +11,83 @@ Features:
 Spotiamp is a now-abandoned tribute to Winamp made by a Spotify developer. I like the compactness and customizability of Winamp, and I am a Spotify user, so it made sense to use it, and update it a bit to my liking.
 
 ## How was it made?
-Originally I was modifying the original executable, but there's only so far that can get you. unfortunately, despite the program being open source, it used an older type of API authentication which meant that obtaining a new key was completely impossible. that being the only obstacle between me and compiling the source code, I reverse engineered the original executable to obtain the key, and put it into the source code.
+
+This project updates the original open-source Spotiamp interface with modern Spotify OAuth, cross-platform builds, and a librespot-based playback bridge.
 
 ## Build
 
-<details>
-<summary><strong>Expand to see build instructions</strong></summary>
+### 1. Create a Spotify app
 
-Install CMake and Conan 2 first. On macOS:
+1. Open the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+2. Click **Create app**.
+3. Add this Redirect URI: `http://127.0.0.1:3000/callback`
+4. Save the app and copy its **Client ID**.
+
+You do not need the Client Secret.
+
+### 2. Download the code
 
 ```sh
-brew install cmake conan
+git clone https://github.com/yungtry/Spotiamp.git
+cd Spotiamp
+```
+
+### macOS
+
+Install [Homebrew](https://brew.sh/) first. Then run:
+
+```sh
+brew install cmake conan rust
 conan profile detect --force
-```
-
-Before configuring a fresh build directory, you need to provide your Spotify application credentials. The CMake build requires these to link authentication keys into the binary.
-
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and log in.
-2. Click **Create app** and set up a new application.
-3. In the application settings, set the **Redirect URI** exactly to: `http://127.0.0.1:3000/callback`
-4. Once created, copy the **Client ID** and **Client Secret**, and export them in your terminal:
-
-```sh
-export SPOTIFY_CLIENT_ID=your_client_id
-export SPOTIFY_CLIENT_SECRET=your_client_secret
-```
-
-Install dependencies:
-
-```sh
+export SPOTIFY_CLIENT_ID="paste_your_client_id_here"
 conan install . -of build/conan -s build_type=Release --build=missing
+cmake -S . -B build/app -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan/build/Release/generators/conan_toolchain.cmake
+cmake --build build/app --parallel
 ```
 
-The first Conan install can take a while because it may build SDL2, libcurl, OpenSSL, and zlib from source. Later builds should reuse the Conan cache.
-OpenSSL is built without command-line apps, FIPS, and legacy providers; Spotiamp only needs libcurl TLS support, and disabling those extras avoids MinGW cross-linking failures.
+The finished program is `build/app/spotiamp`.
 
-### Rust playback bridge
+### Windows
 
-Spotiamp uses the Rust playback bridge for audio playback. Cargo is required when configuring the CMake build:
+Install these first:
 
-```sh
-cargo test --manifest-path playback/librespot_bridge/Cargo.toml
-cmake -B build/conan-cmake \
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/Release/generators/conan_toolchain.cmake \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build/conan-cmake
+- [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) with **Desktop development with C++** selected
+- [Python](https://www.python.org/downloads/)
+- [CMake](https://cmake.org/download/)
+- [Rust](https://rustup.rs/)
+- [Git](https://git-scm.com/download/win)
+
+Open **Developer PowerShell for VS 2022**, enter the Spotiamp folder, and run:
+
+```powershell
+py -m pip install conan
+conan profile detect --force
+$env:SPOTIFY_CLIENT_ID="paste_your_client_id_here"
+conan install . -of build/conan -s build_type=Release --build=missing
+cmake -S . -B build/app -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan/build/Release/generators/conan_toolchain.cmake
+cmake --build build/app --config Release --parallel
 ```
 
-For cross-compilation, pass the matching Cargo target triple:
+The finished program is `build/app/Release/spotiamp.exe`.
+
+### Build Windows version on macOS
+
+Run this from the Spotiamp folder:
 
 ```sh
-cmake -B build/windows \
-  -DCMAKE_TOOLCHAIN_FILE=build/conan-win/build/Release/generators/conan_toolchain.cmake \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DSPOTIAMP_CARGO_TARGET=x86_64-pc-windows-gnu
-```
-
-### Windows from macOS
-
-Install a MinGW-w64 toolchain:
-
-```sh
-brew install mingw-w64
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+brew install cmake conan rust mingw-w64
+conan profile detect --force
 rustup target add x86_64-pc-windows-gnu
+export SPOTIFY_CLIENT_ID="paste_your_client_id_here"
+conan install . -of build/conan-win -pr:b=default -pr:h=conan/profiles/windows-mingw-x64 --build=missing
+cmake -S . -B build/windows -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan-win/build/Release/generators/conan_toolchain.cmake -DSPOTIAMP_CARGO_TARGET=x86_64-pc-windows-gnu
+cmake --build build/windows --parallel
 ```
 
-Then use the Windows host profile:
+The finished Windows program is `build/windows/spotiamp.exe`.
 
-```sh
-conan install . -of build/conan-win \
-  -pr:b=default \
-  -pr:h=conan/profiles/windows-mingw-x64 \
-  --build=missing
-cmake -B build/windows \
-  -DCMAKE_TOOLCHAIN_FILE=build/conan-win/build/Release/generators/conan_toolchain.cmake \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DSPOTIAMP_CARGO_TARGET=x86_64-pc-windows-gnu
-cmake --build build/windows
-```
+### GitHub automatic builds
 
-</details>
+Add `SPOTIFY_CLIENT_ID` in **Settings → Secrets and variables → Actions → New repository secret**. Open the **Actions** tab and run the **Build** workflow. Download `spotiamp-windows` or `spotiamp-macos` from the finished run.
 
 - Playlist screen uses [Montserrat Medium](https://fonts.google.com/download?family=Montserrat)
