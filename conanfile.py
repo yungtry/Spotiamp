@@ -23,7 +23,7 @@ class SpotiampConan(ConanFile):
         if self.settings.os == "Windows":
             self.options["libcurl"].with_ssl = "schannel"
         elif self.settings.os == "Macos":
-            self.options["libcurl"].with_ssl = "secure_transport"
+            self.options["libcurl"].with_ssl = "openssl"
         else:
             self.options["libcurl"].with_ssl = "openssl"
 
