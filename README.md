@@ -4,11 +4,6 @@
 
 ![UI](https://raw.githubusercontent.com/kran27/Spotiamp/main/uidemo.png)
 
-Features:
-- New Modern Theme
-- Fixed Album Art Support
-- Improved Theming Support (WIP)
-
 <details>
 <summary>TODO / Roadmap</summary>
 
@@ -19,10 +14,10 @@ Implemented:
 - [x] Modern Spotify API usage
 - [x] Working liked songs
 - [x] Discover Weekly
+- [x] Fix Album Art support
 
 To be implemented:
 
-- [ ] Fix Album Art support
 - [ ] Liking songs
 - [ ] Adding songs to playlists
 - [ ] Removing songs from playlists
