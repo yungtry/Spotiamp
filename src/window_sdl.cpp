@@ -660,7 +660,11 @@ void PlatformSetSkin(const char *filename) {
   if (filename && *filename) {
     struct stat st;
     if (stat(filename, &st) == 0) {
+#if defined(_WIN32)
+      if ((st.st_mode & _S_IFDIR) != 0) {
+#else
       if (S_ISDIR(st.st_mode)) {
+#endif
         current_skin_basedir = filename;
         if (current_skin_basedir.back() != '/' && current_skin_basedir.back() != '\\') {
           current_skin_basedir += '/';
