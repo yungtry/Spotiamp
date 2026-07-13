@@ -18,8 +18,8 @@ int g_num_monitor_rects;
 PlatformWindow *g_platform_windows;
 PlatformWindow *g_main_window;
 PlatformWindow *g_drag_windows[16];
-int g_num_drag_windows;
-bool g_drag_sizing;
+int g_num_drag_windows = 0;
+bool g_drag_sizing = false;
 Point g_drag_start;
 
 // Returns if b is a neighbor to a, returns the side 0=left, 1=top, 2=right, 3=bottom, -1 = no

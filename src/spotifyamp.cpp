@@ -169,13 +169,17 @@ static const char kBaseSkinFile[] = "base-2.91.wsz";
 
 static SkinInfo skininfo[100];
 
-static void Skin_Index() {
+static void Skin_ClearIndex() {
   for (int i = 0; i < 100; ++i) {
     free((void*)skininfo[i].name);
     free((void*)skininfo[i].filename);
     skininfo[i].name = NULL;
     skininfo[i].filename = NULL;
   }
+}
+
+static void Skin_Index() {
+  Skin_ClearIndex();
   char file[MAX_PATH + 100];
   int num_skins = 0;
   sprintf(file, "%sassets/skins", exepath);
@@ -198,7 +202,6 @@ static void Skin_Index() {
 }
 
 static const char *Skin_Enumerate(int i) {
-  Skin_Index();
   return (i < 0 || i >= 100) ? NULL : skininfo[i].name;
 }
 
@@ -677,6 +680,61 @@ static int PaintText(PlatformWindow *w, const char *text, int scroll, int flags,
     count++;
   }
   return left;
+}
+
+static bool PaintPlaylistTitleBar(PlatformWindow *w, int width, bool active,
+                                  bool expand_hot, bool close_hot,
+                                  const char *title, int title_width) {
+  if (!res.pledit || width < 75)
+    return false;
+
+  w->Blit(0, 0, 25, 14, res.pledit, 72, 42);
+  w->StretchBlit(25, 0, width - 75, 14, res.pledit, 72, 57, 25, 14);
+  w->Blit(width - 50, 0, 50, 14, res.pledit, 99, active ? 42 : 57);
+
+  if (expand_hot)
+    w->Blit(width - 21, 3, 9, 9, res.pledit, 150, 42);
+  if (close_hot)
+    w->Blit(width - 11, 3, 9, 9, res.pledit, 52, 42);
+
+  if (title && title[0] && title_width > 0)
+    PaintText(w, title, 0, kEllipsis, 5, 4, title_width, 6);
+
+  return true;
+}
+
+static bool PaintPlaylistTexturedFrame(PlatformWindow *w, int width, int height,
+                                       bool active, bool close_hot) {
+  if (!res.pledit || width < 100 || height < 32)
+    return false;
+
+  const int y = active ? 0 : 21;
+  const int top_h = 18;
+  const int side_w = 4;
+  const int bottom_h = 4;
+  const int frame_src_x = 127;
+  const int frame_src_y = y + top_h - side_w;
+  const int frame_src_w = 25;
+  const int frame_src_h = side_w;
+
+  w->Blit(0, 0, 25, 20, res.pledit, 0, y);
+  w->StretchBlit(25, 0, width - 50, 20, res.pledit, 127, y, 25, 20);
+  w->Blit(width - 25, 0, 25, 20, res.pledit, 153, y);
+
+  if (close_hot)
+    w->Blit(width - 11, 3, 9, 9, res.pledit, 52, 42);
+
+  w->StretchBlitRotated90(0, top_h, side_w, height - top_h - bottom_h,
+                          res.pledit, frame_src_x, frame_src_y,
+                          frame_src_w, frame_src_h, true);
+  w->StretchBlitRotated90(width - side_w, top_h, side_w,
+                          height - top_h - bottom_h,
+                          res.pledit, frame_src_x, frame_src_y,
+                          frame_src_w, frame_src_h, false);
+  w->StretchBlit(0, height - bottom_h, width, bottom_h, res.pledit,
+                 frame_src_x, frame_src_y, frame_src_w, frame_src_h);
+
+  return true;
 }
 
 void MainWindow::PaintBigNumber(int num, int x, int y) {
@@ -1520,6 +1578,7 @@ void MainWindow::ShowOptionsMenu() {
   menu.EndSubMenu("Settings");
 
   menu.BeginSubMenu();
+  Skin_Index();
   int i = 0;
   menu.AddRadioItem(CMD_SKIN + 0, "Winamp Base 2.91", curr_skin_.empty());
   while (const char *s = Skin_Enumerate(i)) {
@@ -1862,14 +1921,7 @@ void PlaylistWindow::Paint() {
 void PlaylistWindow::PaintCompact() {
   char buffer[1024];
 
-  Blit(0, 0, 25, 14, res.pledit, 72, 42);
-  StretchBlit(25, 0, width() - 75, 14, res.pledit, 72, 57, 25, 14);
-  Blit(width() - 50, 0, 50, 14, res.pledit, 99, active() ? 42 : 57);
-
-  // expand contract
-  if (hover_button_ == 0) Blit(width() - 21, 3, 9, 9, res.pledit, 150, 42);
-  // close
-  if (hover_button_ == 1) Blit(width() - 11, 3, 9, 9, res.pledit, 52, 42);
+  PaintPlaylistTitleBar(this, width(), active(), hover_button_ == 0, hover_button_ == 1, NULL, 0);
 
   Tsp *tsp = main_window_->tsp();
   TspItem *item = TspPlayerGetNowPlaying(tsp);
@@ -2778,15 +2830,9 @@ void CoverArtWindow::Paint() {
   if (!text)
     text = 0xbababa;
 
-  Fill(0, 0, width(), height(), border);
-  if (res.pledit && width() >= 75) {
-    Blit(0, 0, 25, 14, res.pledit, 72, 42);
-    StretchBlit(25, 0, width() - 75, 14, res.pledit, 72, 57, 25, 14);
-    Blit(width() - 50, 0, 50, 14, res.pledit, 99, active() ? 42 : 57);
-    if (CloseButtonHot())
-      Blit(width() - 11, 3, 9, 9, res.pledit, 52, 42);
-  } else {
-    Fill(1, 1, width() - 2, 13, background);
+  if (!PaintPlaylistTexturedFrame(this, width(), height(), active(), CloseButtonHot())) {
+    Fill(0, 0, width(), height(), border);
+    Fill(1, 1, width() - 2, 18, background);
     Fill(width() - 11, 3, 9, 9, border);
     SetPixel(width() - 9, 5, text);
     SetPixel(width() - 8, 6, text);
@@ -2798,20 +2844,11 @@ void CoverArtWindow::Paint() {
     SetPixel(width() - 9, 8, text);
   }
 
-  char title[64];
-  GetWindowText(title, sizeof(title));
-  DrawText(5, 4, width() - 21, 6, title, kEllipsis, text);
-
-  const int content_x = 2;
-  const int content_y = 15;
-  const int content_w = width() - 4;
-  const int content_h = height() - 17;
+  const int content_x = 4;
+  const int content_y = 18;
+  const int content_w = width() - 8;
+  const int content_h = height() - 22;
   Fill(content_x, content_y, content_w, content_h, background);
-
-  SetPixel(width() - 4, height() - 4, text);
-  SetPixel(width() - 3, height() - 3, text);
-  SetPixel(width() - 4, height() - 2, text);
-  SetPixel(width() - 2, height() - 4, text);
 
   if (bitmap_) {
     Size size = PlatformGetBitmapSize(bitmap_);

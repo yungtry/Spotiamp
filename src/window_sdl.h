@@ -40,6 +40,10 @@ public:
   // Draw a bitmap to a portion of the window
   void StretchBlit(int dx, int dy, int w, int h, Bitmap *src, int sx, int sy, int sw, int sh);
 
+  // Draw a bitmap region rotated 90 degrees and stretched into the destination.
+  void StretchBlitRotated90(int dx, int dy, int w, int h, Bitmap *src,
+                            int sx, int sy, int sw, int sh, bool clockwise);
+
   // Fill a rectangle with a color
   void Fill(int x, int y, int w, int h, unsigned int color);
 

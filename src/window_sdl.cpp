@@ -65,6 +65,7 @@ static Rect g_drag_start_rects[16];
 static int g_drag_start_width;
 static int g_drag_start_height;
 static PlatformWindow *g_captured_window = NULL;
+static Uint32 g_ignore_left_button_up_window_id = 0;
 static bool HandleActiveMenuEvent(SDL_Event *event);
 
 static bool PlatformDirectoryExists(const std::string &path) {
@@ -126,6 +127,34 @@ static void PlatformNormalizeBasePath() {
 }
 
 void PlatformWindow::UpdateActiveWindowDrag() {
+  int gx = 0;
+  int gy = 0;
+  const Uint32 mouse_buttons = SDL_GetGlobalMouseState(&gx, &gy);
+
+  // SDL can occasionally miss the matching mouse-up when a borderless window is
+  // being moved, focus changes, or a popup steals events. Do not leave the app
+  // in a stale captured/dragging state; that is what makes windows feel like
+  // they lag behind and then "catch up" later.
+  if ((g_captured_window || g_num_drag_windows > 0) &&
+      !(mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+    PlatformWindow *released_window = g_captured_window;
+    g_captured_window = NULL;
+    SDL_CaptureMouse(SDL_FALSE);
+    SaveDraggedWindowPositions();
+    g_num_drag_windows = 0;
+    g_has_pending_drag_start = false;
+
+    if (released_window) {
+      int wx = 0;
+      int wy = 0;
+      SDL_GetWindowPosition(released_window->window_, &wx, &wy);
+      int d = released_window->double_size() ? 1 : 0;
+      g_ignore_left_button_up_window_id = released_window->window_id_;
+      released_window->LeftButtonUp((gx - wx) >> d, (gy - wy) >> d);
+    }
+    return;
+  }
+
   if (g_num_drag_windows <= 0)
     return;
 
@@ -133,9 +162,6 @@ void PlatformWindow::UpdateActiveWindowDrag() {
   if (!w)
     return;
 
-  int gx = 0;
-  int gy = 0;
-  SDL_GetGlobalMouseState(&gx, &gy);
   int dx = gx - g_drag_start_global.x;
   int dy = gy - g_drag_start_global.y;
   if (!dx && !dy)
@@ -227,6 +253,71 @@ void PlatformWindow::StretchBlit(int dx, int dy, int w, int h, Bitmap *src, int 
   SDL_Rect dstrect = {dx * d, dy * d, w * d, h * d};
   
   SDL_BlitScaled(srcb, &srcrect, surface_, &dstrect);
+}
+
+void PlatformWindow::StretchBlitRotated90(int dx, int dy, int w, int h, Bitmap *src,
+                                          int sx, int sy, int sw, int sh,
+                                          bool clockwise) {
+  if (!surface_ || !src || w <= 0 || h <= 0 || sw <= 0 || sh <= 0)
+    return;
+
+  SDL_Surface *srcb = (SDL_Surface*)src;
+  if (sx < 0 || sy < 0 || sx + sw > srcb->w || sy + sh > srcb->h)
+    return;
+
+  SDL_Surface *slice = SDL_CreateRGBSurfaceWithFormat(0, sw, sh, 32, SDL_PIXELFORMAT_ARGB8888);
+  SDL_Surface *rotated = SDL_CreateRGBSurfaceWithFormat(0, sh, sw, 32, SDL_PIXELFORMAT_ARGB8888);
+  if (!slice || !rotated) {
+    if (slice) SDL_FreeSurface(slice);
+    if (rotated) SDL_FreeSurface(rotated);
+    return;
+  }
+
+  SDL_Rect srcrect = {sx, sy, sw, sh};
+  SDL_BlitSurface(srcb, &srcrect, slice, NULL);
+
+  bool slice_locked = false;
+  bool rotated_locked = false;
+  if (SDL_MUSTLOCK(slice)) {
+    if (SDL_LockSurface(slice) != 0) {
+      SDL_FreeSurface(rotated);
+      SDL_FreeSurface(slice);
+      return;
+    }
+    slice_locked = true;
+  }
+  if (SDL_MUSTLOCK(rotated)) {
+    if (SDL_LockSurface(rotated) != 0) {
+      if (slice_locked)
+        SDL_UnlockSurface(slice);
+      SDL_FreeSurface(rotated);
+      SDL_FreeSurface(slice);
+      return;
+    }
+    rotated_locked = true;
+  }
+
+  for (int src_y = 0; src_y < sh; ++src_y) {
+    const Uint32 *src_row = (const Uint32*)((const Uint8*)slice->pixels + src_y * slice->pitch);
+    for (int src_x = 0; src_x < sw; ++src_x) {
+      int dst_x = clockwise ? sh - 1 - src_y : src_y;
+      int dst_y = clockwise ? src_x : sw - 1 - src_x;
+      Uint32 *dst_row = (Uint32*)((Uint8*)rotated->pixels + dst_y * rotated->pitch);
+      dst_row[dst_x] = src_row[src_x];
+    }
+  }
+
+  if (rotated_locked)
+    SDL_UnlockSurface(rotated);
+  if (slice_locked)
+    SDL_UnlockSurface(slice);
+
+  int d = (double_size() ? 2 : 1) * BackingScale();
+  SDL_Rect dstrect = {dx * d, dy * d, w * d, h * d};
+  SDL_BlitScaled(rotated, NULL, surface_, &dstrect);
+
+  SDL_FreeSurface(rotated);
+  SDL_FreeSurface(slice);
 }
 
 void PlatformWindow::Fill(int x, int y, int w, int h, unsigned int color) {
@@ -394,6 +485,7 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
       g_pending_drag_start_global.y = wy + event->button.y;
       g_has_pending_drag_start = true;
       if (event->button.button == SDL_BUTTON_LEFT) {
+        g_ignore_left_button_up_window_id = 0;
         w->MouseMove(x, y);
         if (event->button.clicks == 2) {
           w->LeftButtonDouble(x, y);
@@ -412,6 +504,11 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
     break;
   }
   case SDL_MOUSEBUTTONUP: {
+    if (event->button.button == SDL_BUTTON_LEFT &&
+        g_ignore_left_button_up_window_id == event->button.windowID) {
+      g_ignore_left_button_up_window_id = 0;
+      break;
+    }
     PlatformWindow *w = g_captured_window ? g_captured_window : FromID(event->button.windowID);
     if (w) {
       int mx, my;
