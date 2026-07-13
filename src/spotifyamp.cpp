@@ -65,10 +65,24 @@ extern WindowHandle g_visualizer_wnd;
 static byte glyphs[26], glyphx[26];
 
 Resources res;
+class LoginWindow : public PlatformWindow {
+public:
+  LoginWindow() {
+    id_ = 4;
+    Resize(WND_MAIN_W, 32);
+  }
+
+  virtual void Paint() override {
+    Fill(0, 0, width(), height(), 0x181818);
+    DrawText(12, 8, width() - 24, 14, "Logging in with Spotify...", 0, 0xbababa);
+  }
+};
+
 static MainWindow main_window;
 static PlaylistWindow playlist_window(&main_window);
 static EqWindow eq_window(&main_window);
 static CoverArtWindow coverart_window(&main_window);
+static LoginWindow login_window;
 
 static int tsp_iteration;
 static Shoutcast *g_sc;
@@ -114,28 +128,21 @@ static std::string NormalizeSpotifyPlaylistUri(const std::string &input) {
     if (start != std::string::npos)
       start += strlen(web_prefix);
     else
-      start = 0;
+      return "";
   }
   size_t end = start;
   while (end < input.size() && isalnum((unsigned char)input[end]))
     ++end;
-  return end > start ? std::string(uri_prefix) + input.substr(start, end - start) : "";
+  size_t id_len = end - start;
+  return id_len == 22 ? std::string(uri_prefix) + input.substr(start, id_len) : "";
 }
 
 static std::string ResolveDiscoverWeeklyUri(Tsp *tsp) {
-  std::string saved = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
+  (void)tsp;
+  std::string pref = PrefReadStr("", kDiscoverWeeklyPref);
+  std::string saved = NormalizeSpotifyPlaylistUri(pref);
   if (!saved.empty())
     return saved;
-
-  for (int i = 0; i < TspGetRootlistCount(tsp); ++i) {
-    if (stricmp(TspGetRootlistName(tsp, i), "Discover Weekly") == 0) {
-      saved = NormalizeSpotifyPlaylistUri(TspGetRootlistUri(tsp, i));
-      if (!saved.empty()) {
-        PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
-        return saved;
-      }
-    }
-  }
 
   return kDiscoverWeeklyContextUri;
 }
@@ -1378,8 +1385,6 @@ void MainWindow::OpenUri(const char *query, int track_to_play) {
     return;
   if (strcmp(query, kDiscoverWeeklyPseudoUri) == 0) {
     std::string discover_uri = ResolveDiscoverWeeklyUri(tsp_);
-    if (discover_uri.empty())
-      return;
     std::cout << "[DEBUG] Discover Weekly: starting context " << discover_uri << std::endl;
     itemlist_in_sync_with_player_ = false;
     pending_queue_uri_.clear();
@@ -1390,6 +1395,10 @@ void MainWindow::OpenUri(const char *query, int track_to_play) {
       discover_queue_uri_ += "format";
     waiting_for_discover_playback_ = true;
     TspPlayerPlayContext(tsp_, discover_uri.c_str(), NULL, 0);
+    if (discover_uri.rfind("spotify:playlist:", 0) == 0) {
+      pending_queue_uri_ = discover_queue_uri_;
+      TspItemListLoad(item_list_, discover_queue_uri_.c_str(), 0);
+    }
     return;
   }
   if (memcmp(query, "spotify:", 8) != 0 && query[0] != '<')
@@ -1616,10 +1625,13 @@ void MainWindow::StartLogin() {
   playlist_window_->SetVisible(false);
   eq_window_->SetVisible(false);
   coverart_window.SetVisible(false);
+  login_window.SetVisible(true);
+  login_window.MakeActive();
   std::thread([this]() {
     TspError result = TspLogin(tsp_, "", "", kTspCredentialType_OAuth);
     RunOnMainThread([this, result]() {
       login_in_progress_ = false;
+      login_window.SetVisible(false);
       if (result >= 0) {
         username_ = "Spotify";
         SetVisible(true);
@@ -1629,6 +1641,9 @@ void MainWindow::StartLogin() {
           playlist_window_->SetVisible(true);
         if (coverart_visible_)
           coverart_window.SetVisible(true);
+        MakeActive();
+      } else {
+        SetVisible(true);
         MakeActive();
       }
     });
@@ -2039,6 +2054,20 @@ void PlaylistWindow::SelectItem(int item) {
 // Scroll so that the playing item is in view.
 void PlaylistWindow::ScrollInView() {
   int item = TspItemListGetNowPlayingIndex(main_window_->item_list());
+  TspItem *now_playing_item = TspPlayerGetNowPlaying(main_window_->tsp());
+  const char *playing_uri = now_playing_item ? TspItemGetUri(now_playing_item, main_window_->tsp()) : NULL;
+  if (playing_uri && playing_uri[0]) {
+    TspItemList *item_list = main_window_->item_list();
+    int count = ItemCount();
+    for (int i = 0; i < count; ++i) {
+      TspItem *row = TspItemListGetItem(item_list, i);
+      const char *row_uri = row ? TspItemGetUri(row, main_window_->tsp()) : NULL;
+      if (row_uri && strcmp(row_uri, playing_uri) == 0) {
+        item = i;
+        break;
+      }
+    }
+  }
   if (item < 0) return;
   int visible_count = VisibleItemCount();
   if ((unsigned)(item - scroll_) >= (unsigned)visible_count)
@@ -2863,9 +2892,11 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
     } else if (event == kTspCallbackEvent_NowPlayingChanged || event == kTspCallbackEvent_RemoteUpdate) {
       if (w->waiting_for_discover_playback_) {
         w->waiting_for_discover_playback_ = false;
-        w->pending_queue_uri_ = w->discover_queue_uri_;
-        std::cout << "[DEBUG] Discover Weekly: playback started; loading Spotify queue" << std::endl;
-        TspItemListLoad(w->item_list(), w->discover_queue_uri_.c_str(), 0);
+        if (w->pending_queue_uri_.empty()) {
+          w->pending_queue_uri_ = w->discover_queue_uri_;
+          std::cout << "[DEBUG] Discover Weekly: playback started; loading resolved playlist" << std::endl;
+          TspItemListLoad(w->item_list(), w->discover_queue_uri_.c_str(), 0);
+        }
       }
       w->ResetScroll();
       w->Repaint();
@@ -2932,6 +2963,7 @@ PlatformWindow *InitSpotamp(int argc, char **argv) {
   playlist_window.Create(&main_window);
   eq_window.Create(&main_window);
   coverart_window.Create(&main_window);
+  login_window.Create(&main_window);
 
   g_visualizer_wnd = main_window.SetVisualizer(24, 43, 76, 16);
 

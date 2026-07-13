@@ -2315,6 +2315,7 @@ name = "spotiamp_playback_bridge"
 version = "0.0.1"
 dependencies = [
  "librespot",
+ "protobuf",
  "tokio",
 ]
 

@@ -15,6 +15,7 @@ Features:
 Implemented:
 
 - [x] Librespot player backend
+- [x] Crossplatform SDL UI
 - [x] Modern Spotify API usage
 - [x] Working liked songs
 - [x] Discover Weekly
@@ -28,6 +29,7 @@ To be implemented:
 - [ ] Creating playlists
 - [ ] Radios
 - [ ] Milkdrop visualizer
+- [ ] Linux support
 
 </details>
 

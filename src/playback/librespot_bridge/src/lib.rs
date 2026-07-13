@@ -1,6 +1,10 @@
 use librespot::{
     connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc},
-    core::{authentication::Credentials, cache::Cache, config::SessionConfig, session::Session},
+    core::{
+        authentication::Credentials, cache::Cache, config::SessionConfig, session::Session,
+        SpotifyUri,
+    },
+    protocol::playlist4_external::SelectedListContent,
     playback::{
         audio_backend::{Sink, SinkError, SinkResult},
         config::{PlayerConfig, VolumeCtrl},
@@ -21,6 +25,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use protobuf::Message;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 const BRIDGE_VERSION: &[u8] = b"spotiamp-playback-bridge/0.2.0-librespot\0";
@@ -31,6 +36,73 @@ const AUDIO_BYTES_PER_SECOND: usize = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * AUDIO
 const AUDIO_CAPACITY_BYTES: usize = AUDIO_BYTES_PER_SECOND;
 
 static GLOBAL_BRIDGE: Mutex<Option<Bridge>> = Mutex::new(None);
+
+fn normalize_playlist_uri(uri: &str) -> Option<String> {
+    if uri.starts_with("spotify:playlist:") {
+        return Some(uri.to_string());
+    }
+    let marker = ":playlist:";
+    let pos = uri.find(marker)?;
+    let id_start = pos + marker.len();
+    let id = uri[id_start..]
+        .split(|c| c == ':' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("");
+    if id.is_empty() {
+        None
+    } else {
+        Some(format!("spotify:playlist:{id}"))
+    }
+}
+
+fn looks_like_discover_weekly(name: &str, format: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let format = format.to_ascii_lowercase();
+    (format.contains("discover") && format.contains("weekly"))
+        || (name.contains("discover") && name.contains("weekly"))
+}
+
+fn discover_weekly_from_rootlist(rootlist: &SelectedListContent) -> Option<String> {
+    let contents = rootlist.contents.get_or_default();
+    for (index, item) in contents.items.iter().enumerate() {
+        let Some(meta) = contents.meta_items.get(index) else {
+            continue;
+        };
+        let attributes = meta.attributes.get_or_default();
+        let name = attributes.name();
+        let format = attributes.format();
+        if looks_like_discover_weekly(name, format) {
+            if let Some(uri) = normalize_playlist_uri(item.uri()) {
+                eprintln!(
+                    "[spotiamp_playback_bridge] Discover Weekly rootlist match: name='{name}' format='{format}' uri='{uri}'"
+                );
+                return Some(uri);
+            }
+        }
+    }
+
+    let mut shown = 0;
+    for (index, item) in contents.items.iter().enumerate() {
+        let Some(meta) = contents.meta_items.get(index) else {
+            continue;
+        };
+        let attributes = meta.attributes.get_or_default();
+        let name = attributes.name();
+        let format = attributes.format();
+        if !name.is_empty() || !format.is_empty() {
+            eprintln!(
+                "[spotiamp_playback_bridge] rootlist item: name='{name}' format='{format}' uri='{}'",
+                item.uri()
+            );
+            shown += 1;
+            if shown >= 8 {
+                break;
+            }
+        }
+    }
+
+    None
+}
 
 struct AudioPipe {
     state: Mutex<AudioPipeState>,
@@ -772,6 +844,142 @@ pub extern "C" fn sp_playback_bridge_resolve_context_tracks(
     }
     if output.len() + 1 > buffer_size {
         return -4;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(output.as_ptr(), buffer.cast::<u8>(), output.len());
+        *buffer.add(output.len()) = 0;
+    }
+    output.len() as i32
+}
+
+#[no_mangle]
+pub extern "C" fn sp_playback_bridge_resolve_discover_weekly_playlist(
+    buffer: *mut c_char,
+    buffer_size: usize,
+) -> i32 {
+    if buffer.is_null() || buffer_size == 0 {
+        return -1;
+    }
+
+    let bridge = GLOBAL_BRIDGE.lock().unwrap();
+    let Some(bridge) = bridge.as_ref() else {
+        return -2;
+    };
+
+    let mut found: Option<String> = None;
+    let mut last_error = false;
+    for from in (0..600usize).step_by(120) {
+        let result = bridge
+            .runtime
+            .block_on(bridge._session.spclient().get_rootlist(from, Some(120)));
+        let Ok(bytes) = result else {
+            eprintln!(
+                "[spotiamp_playback_bridge] Discover Weekly rootlist request failed at offset {from}"
+            );
+            last_error = true;
+            break;
+        };
+        let Ok(rootlist) = SelectedListContent::parse_from_bytes(&bytes) else {
+            eprintln!(
+                "[spotiamp_playback_bridge] Discover Weekly rootlist parse failed at offset {from}"
+            );
+            last_error = true;
+            break;
+        };
+
+        let contents = rootlist.contents.get_or_default();
+        eprintln!(
+            "[spotiamp_playback_bridge] rootlist page offset={from} items={} meta_items={} total_length={}",
+            contents.items.len(),
+            contents.meta_items.len(),
+            rootlist.length()
+        );
+
+        if let Some(uri) = discover_weekly_from_rootlist(&rootlist) {
+            found = Some(uri);
+            break;
+        }
+
+        if contents.items.len() < 120 {
+            break;
+        }
+    }
+
+    let Some(output) = found else {
+        return if last_error { -3 } else { 0 };
+    };
+
+    if output.len() + 1 > buffer_size {
+        return -4;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(output.as_ptr(), buffer.cast::<u8>(), output.len());
+        *buffer.add(output.len()) = 0;
+    }
+    output.len() as i32
+}
+
+#[no_mangle]
+pub extern "C" fn sp_playback_bridge_resolve_playlist_tracks(
+    playlist_uri: *const c_char,
+    buffer: *mut c_char,
+    buffer_size: usize,
+) -> i32 {
+    let Some(playlist_uri) = cstr_to_string(playlist_uri) else {
+        return -1;
+    };
+    if buffer.is_null() || buffer_size == 0 {
+        return -2;
+    }
+
+    let Ok(spotify_uri) = SpotifyUri::from_uri(&playlist_uri) else {
+        return -3;
+    };
+    let SpotifyUri::Playlist { id, .. } = spotify_uri else {
+        return -4;
+    };
+
+    let bridge = GLOBAL_BRIDGE.lock().unwrap();
+    let Some(bridge) = bridge.as_ref() else {
+        return -5;
+    };
+
+    let result = bridge
+        .runtime
+        .block_on(bridge._session.spclient().get_playlist(&id));
+    let Ok(bytes) = result else {
+        eprintln!(
+            "[spotiamp_playback_bridge] playlist/v2 request failed for {playlist_uri}"
+        );
+        return -6;
+    };
+    let Ok(playlist) = SelectedListContent::parse_from_bytes(&bytes) else {
+        eprintln!(
+            "[spotiamp_playback_bridge] playlist/v2 parse failed for {playlist_uri}"
+        );
+        return -7;
+    };
+
+    let contents = playlist.contents.get_or_default();
+    let mut output = String::new();
+    for item in &contents.items {
+        let uri = item.uri();
+        if uri.starts_with("spotify:track:") {
+            output.push_str(uri);
+            output.push('\n');
+        }
+    }
+
+    eprintln!(
+        "[spotiamp_playback_bridge] playlist/v2 {playlist_uri} returned {} track uris",
+        output.lines().count()
+    );
+
+    if output.is_empty() {
+        return 0;
+    }
+    if output.len() + 1 > buffer_size {
+        return -8;
     }
     unsafe {
         std::ptr::copy_nonoverlapping(output.as_ptr(), buffer.cast::<u8>(), output.len());

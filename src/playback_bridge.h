@@ -43,6 +43,11 @@ int sp_playback_bridge_load_context(const char *context_uri,
 int sp_playback_bridge_resolve_context_tracks(const char *context_uri,
                                               char *buffer,
                                               uintptr_t buffer_size);
+int sp_playback_bridge_resolve_discover_weekly_playlist(char *buffer,
+                                                        uintptr_t buffer_size);
+int sp_playback_bridge_resolve_playlist_tracks(const char *playlist_uri,
+                                               char *buffer,
+                                               uintptr_t buffer_size);
 int sp_playback_bridge_play(void);
 int sp_playback_bridge_pause(void);
 int sp_playback_bridge_stop_playback(void);

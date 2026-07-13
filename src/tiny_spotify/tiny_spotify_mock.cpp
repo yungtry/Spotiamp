@@ -53,8 +53,10 @@ struct TspItemList {
   std::vector<std::string> radio_seed_uris;
   int total_length;
   bool dynamic_loading;
+  std::atomic<bool> loading_all_saved_tracks;
+  std::atomic<int> load_generation;
   int now_playing_index;
-  TspItemList() : total_length(0), dynamic_loading(false), now_playing_index(0) {}
+  TspItemList() : total_length(0), dynamic_loading(false), loading_all_saved_tracks(false), load_generation(0), now_playing_index(0) {}
 };
 
 struct Tsp {
@@ -84,7 +86,9 @@ struct Tsp {
   long long local_control_until_ms;
   long long local_audio_hold_until_ms;
   long long local_position_command_started_ms;
+  long long local_expected_track_until_ms;
   int local_expected_position_ms;
+  std::string local_expected_track_uri;
   bool local_bridge_transition_seen;
   bool local_desired_playing;
   bool local_stopped;
@@ -107,7 +111,8 @@ struct Tsp {
           connected(false), connection_error(kTspErrorOk), has_now_playing(false),
           player_position_ms(0), player_duration_ms(0), player_position_updated_ms(0),
           local_control_until_ms(0), local_audio_hold_until_ms(0),
-          local_position_command_started_ms(0), local_expected_position_ms(-1),
+          local_position_command_started_ms(0), local_expected_track_until_ms(0),
+          local_expected_position_ms(-1),
           local_bridge_transition_seen(false), local_desired_playing(false),
           local_stopped(false), is_playing(false), volume(65535),
           shuffle(false), repeat(false), remote_playback_active(false), player_list(NULL),
@@ -212,6 +217,11 @@ static bool AudioTransitionLocked(Tsp *tsp, long long now_ms) {
 
 static void SetAudioHoldLocked(Tsp *tsp, long long now_ms, int hold_ms) {
   tsp->local_audio_hold_until_ms = now_ms + hold_ms;
+}
+
+static void SetExpectedTrackLocked(Tsp *tsp, const std::string &uri, long long now_ms) {
+  tsp->local_expected_track_uri = uri;
+  tsp->local_expected_track_until_ms = now_ms + 3500;
 }
 
 static void StartPositionTransitionLocked(Tsp *tsp, int expected_position_ms,
@@ -455,6 +465,7 @@ static void DispatchAudioControl(Tsp *tsp, int flags) {
 }
 
 static void ApplyNowPlayingFromItemLocked(Tsp *tsp, TspItem *item, int index) {
+  long long now_ms = NowMonotonicMs();
   tsp->now_playing_item.name = item->name;
   tsp->now_playing_item.artist = item->artist;
   tsp->now_playing_item.album_uri = item->album_uri;
@@ -466,11 +477,11 @@ static void ApplyNowPlayingFromItemLocked(Tsp *tsp, TspItem *item, int index) {
   tsp->now_playing_item.playable = item->playable;
   tsp->player_duration_ms = item->duration_sec * 1000;
   tsp->player_position_ms = 0;
-  tsp->player_position_updated_ms = NowMonotonicMs();
+  tsp->player_position_updated_ms = now_ms;
   tsp->has_now_playing = true;
   tsp->local_desired_playing = true;
   tsp->local_stopped = false;
-  long long now_ms = NowMonotonicMs();
+  SetExpectedTrackLocked(tsp, item->uri, now_ms);
   StartPositionTransitionLocked(tsp, 0, now_ms, 5000, 60);
   if (tsp->player_list) {
     tsp->player_list->now_playing_index = index;
@@ -551,6 +562,26 @@ static bool SetPendingNowPlayingIndex(Tsp *tsp, int index) {
   return true;
 }
 
+static int FindItemIndexByUri(TspItemList *tl, const std::string &uri) {
+  if (!tl || uri.empty())
+    return -1;
+  for (int i = 0; i < (int)tl->items.size(); ++i) {
+    TspItem *item = tl->items[i];
+    if (item && item->uri == uri)
+      return i;
+  }
+  return -1;
+}
+
+static int SyncPlayerListIndexToNowPlayingLocked(Tsp *tsp) {
+  if (!tsp || !tsp->player_list || !tsp->has_now_playing)
+    return -1;
+  int index = FindItemIndexByUri(tsp->player_list, tsp->now_playing_item.uri);
+  if (index >= 0)
+    tsp->player_list->now_playing_index = index;
+  return index;
+}
+
 static int PickNextIndex(Tsp *tsp, int direction) {
   if (!tsp || !tsp->player_list || tsp->player_list->items.empty()) return -1;
   int count = (int)tsp->player_list->items.size();
@@ -560,6 +591,11 @@ static int PickNextIndex(Tsp *tsp, int direction) {
   bool repeat = false;
   {
     std::lock_guard<std::mutex> lock(tsp->mutex);
+    int synced_index = SyncPlayerListIndexToNowPlayingLocked(tsp);
+    if (synced_index >= 0)
+      current = synced_index;
+    else
+      current = tsp->player_list->now_playing_index;
     shuffle = tsp->shuffle;
     repeat = tsp->repeat;
   }
@@ -1290,84 +1326,35 @@ static void AppendTrackObjects(std::vector<TspItem*> *tracks,
   }
 }
 
-static void AppendCurrentPlaybackQueue(std::vector<TspItem*> *tracks, Tsp *tsp) {
-  std::string response = HttpGet("https://api.spotify.com/v1/me/player/queue", GetAccessToken(tsp));
-  if (response.empty()) {
-    std::cout << "[DEBUG] Discover Weekly: queue endpoint status " << LastHttpStatus() << std::endl;
-    return;
-  }
-
-  std::string current = JsonExtractObjectShallow(response, "currently_playing");
-  if (!current.empty() && JsonExtractStringShallow(current, "type") == "track") {
-    TspItem *item = CreateTrackItemFromJson(current);
-    if (item)
-      tracks->push_back(item);
-  }
-
-  auto queued = JsonExtractObjectsFromArrayString(JsonExtractArrayStringShallow(response, "queue"));
-  for (const auto &object : queued) {
-    if (JsonExtractStringShallow(object, "type") != "track")
-      continue;
-    TspItem *item = CreateTrackItemFromJson(object);
-    if (item)
-      tracks->push_back(item);
-  }
-  std::cout << "[DEBUG] Discover Weekly: loaded " << tracks->size()
-            << " tracks from the current Spotify queue" << std::endl;
-}
-
-static void AppendResolvedContextTracks(std::vector<TspItem*> *tracks, Tsp *tsp,
-                                        const std::string &context_uri) {
-  char uri_buffer[16384];
-  int result = sp_playback_bridge_resolve_context_tracks(
-      context_uri.c_str(), uri_buffer, sizeof(uri_buffer));
-  if (result <= 0) {
-    std::cout << "[DEBUG] Discover Weekly: librespot context resolve failed " << result << std::endl;
-    return;
-  }
-
+static void AppendTrackUris(std::vector<TspItem*> *tracks, Tsp *tsp,
+                            const std::vector<std::string> &track_uris) {
   std::vector<std::string> ids;
-  std::string uris(uri_buffer, result);
-  size_t pos = 0;
-  while (pos < uris.size()) {
-    size_t end = uris.find('\n', pos);
-    std::string uri = uris.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+  for (const auto &uri : track_uris) {
     std::string id = SpotifyIdFromUri(uri, "track");
     if (!id.empty())
       ids.push_back(id);
-    if (end == std::string::npos)
-      break;
-    pos = end + 1;
   }
 
-  for (size_t start = 0; start < ids.size(); start += 10) {
+  int start_count = (int)tracks->size();
+  for (size_t start = 0; start < ids.size(); start += 50) {
     std::string joined;
-    size_t end = start + 10 < ids.size() ? start + 10 : ids.size();
+    size_t end = start + 50 < ids.size() ? start + 50 : ids.size();
     for (size_t i = start; i < end; ++i) {
       if (!joined.empty()) joined += ',';
       joined += ids[i];
     }
-    std::string response = HttpGet("https://api.spotify.com/v1/tracks?ids=" + joined,
-                                   GetAccessToken(tsp));
-    auto objects = JsonExtractArray(response, "tracks");
-    for (const auto &object : objects) {
-      std::string uri = JsonExtractStringShallow(object, "uri");
-      bool already_present = false;
-      for (const auto *track : *tracks) {
-        if (track && track->uri == uri) {
-          already_present = true;
-          break;
-        }
-      }
-      if (!already_present) {
-        TspItem *item = CreateTrackItemFromJson(object);
-        if (item)
-          tracks->push_back(item);
-      }
+    std::string response = HttpGet("https://api.spotify.com/v1/tracks?ids=" + joined +
+                                   "&market=from_token", GetAccessToken(tsp));
+    if (response.find("\"error\"") != std::string::npos) {
+      std::cout << "[DEBUG] AppendTrackUris: status " << LastHttpStatus()
+                << ": " << response << std::endl;
+      break;
     }
+    AppendTrackObjects(tracks, JsonExtractArray(response, "tracks"));
   }
-  std::cout << "[DEBUG] Discover Weekly: loaded " << tracks->size()
-            << " tracks from the librespot context" << std::endl;
+  std::cout << "[DEBUG] AppendTrackUris: loaded "
+            << ((int)tracks->size() - start_count) << " playable tracks from "
+            << ids.size() << " bridge track uris" << std::endl;
 }
 
 static void AppendPlaylistItemObjects(std::vector<TspItem*> *tracks,
@@ -1438,37 +1425,64 @@ static void AppendSearchTracks(std::vector<TspItem*> *tracks, Tsp *tsp, const st
   AppendTrackObjects(tracks, items);
 }
 
-static int LoadSavedTracksPage(TspItemList *tl, Tsp *tsp, int offset, int limit) {
-  if (!tl || !tsp || limit <= 0)
-    return 0;
+struct SavedTracksPage {
+  int offset;
+  int total;
+  int fetched;
+  std::vector<TspItem*> tracks;
+  SavedTracksPage() : offset(0), total(0), fetched(0) {}
+};
+
+static void DeleteSavedTracksPage(SavedTracksPage *page) {
+  if (!page) return;
+  for (auto *track : page->tracks)
+    delete track;
+  page->tracks.clear();
+}
+
+static SavedTracksPage FetchSavedTracksPage(Tsp *tsp, int offset, int limit) {
+  SavedTracksPage page;
+  page.offset = offset;
+  if (!tsp || limit <= 0)
+    return page;
+
   std::string url = "https://api.spotify.com/v1/me/tracks?limit=" +
                     std::to_string(limit) + "&offset=" + std::to_string(offset);
   std::string response = HttpGet(url, tsp->access_token);
-  int total = JsonExtractInt(response, "total");
-  if (total > 0 && total != tl->total_length) {
-    tl->total_length = total;
-    tl->items.resize(total, NULL);
-  }
+  page.total = JsonExtractInt(response, "total");
 
   auto items = JsonExtractArray(response, "items");
-  int loaded = 0;
+  page.fetched = (int)items.size();
   for (const auto &item_json : items) {
     std::string track_json = JsonExtractObjectShallow(item_json, "track");
     if (track_json.empty())
       continue;
     TspItem *item = CreateTrackItemFromJson(track_json);
-    if (!item)
-      continue;
-    int slot = offset + loaded;
-    if (slot >= (int)tl->items.size())
-      tl->items.resize(slot + 1, NULL);
-    delete tl->items[slot];
-    tl->items[slot] = item;
-    loaded++;
+    if (item)
+      page.tracks.push_back(item);
   }
-  if (tl->total_length <= 0)
-    tl->total_length = (int)tl->items.size();
-  return loaded;
+
+  return page;
+}
+
+static int StoreSavedTracksPage(TspItemList *tl, SavedTracksPage *page, int load_generation) {
+  if (!tl || !page)
+    return 0;
+  if (load_generation >= 0 && tl->load_generation != load_generation) {
+    DeleteSavedTracksPage(page);
+    return 0;
+  }
+
+  int playable = 0;
+  for (int i = 0; i < (int)page->tracks.size(); ++i) {
+    tl->items.push_back(page->tracks[i]);
+    page->tracks[i] = NULL;
+    playable++;
+  }
+  tl->total_length = (int)tl->items.size();
+
+  DeleteSavedTracksPage(page);
+  return playable;
 }
 
 static const char *TopListPlaylistId(const std::string &code) {
@@ -1531,29 +1545,61 @@ static bool EqualFold(const std::string &a, const std::string &b) {
   return true;
 }
 
-static std::string FindUserPlaylistByName(Tsp *tsp, const char *name) {
-  if (!tsp || !name)
-    return "";
-  for (const auto &item : tsp->rootlist) {
-    if (item.type == kTspItemType_Playlist && EqualFold(item.name, name)) {
-      return SpotifyIdFromUri(item.uri, "playlist");
-    }
+static void AppendTrackUris(std::vector<TspItem*> *tracks, Tsp *tsp,
+                            const std::vector<std::string> &track_uris);
+
+static void AppendBridgePlaylistTracks(std::vector<TspItem*> *tracks, Tsp *tsp,
+                                       const std::string &playlist_uri) {
+  char uri_buffer[32768];
+  int result = sp_playback_bridge_resolve_playlist_tracks(
+      playlist_uri.c_str(), uri_buffer, sizeof(uri_buffer));
+  if (result <= 0) {
+    std::cout << "[DEBUG] Discover Weekly: bridge playlist track resolver failed "
+              << result << " for " << playlist_uri << std::endl;
+    return;
   }
-  std::string url = "https://api.spotify.com/v1/me/playlists?limit=50";
-  while (!url.empty()) {
-    std::string response = HttpGet(url, tsp->access_token);
-    auto items = JsonExtractArray(response, "items");
-    for (const auto &item_json : items) {
-      if (!EqualFold(JsonExtractStringShallow(item_json, "name"), name))
-        continue;
-      std::string id = SpotifyIdFromUri(JsonExtractStringShallow(item_json, "uri"), "playlist");
-      if (!id.empty())
-        return id;
-    }
-    std::string next_url = JsonExtractString(response, "next");
-    url = next_url.rfind("https://", 0) == 0 ? next_url : "";
+
+  std::vector<std::string> track_uris;
+  std::string uris(uri_buffer, result);
+  size_t pos = 0;
+  while (pos < uris.size()) {
+    size_t end = uris.find('\n', pos);
+    std::string uri = uris.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    if (!uri.empty())
+      track_uris.push_back(uri);
+    if (end == std::string::npos)
+      break;
+    pos = end + 1;
   }
-  return "";
+
+  AppendTrackUris(tracks, tsp, track_uris);
+}
+
+static void AppendDiscoverWeeklyTracks(std::vector<TspItem*> *tracks, Tsp *tsp,
+                                       const std::string &playlist_id) {
+  if (!playlist_id.empty() && playlist_id != "format") {
+    AppendBridgePlaylistTracks(tracks, tsp, "spotify:playlist:" + playlist_id);
+    return;
+  }
+
+  char uri_buffer[512];
+  int result = sp_playback_bridge_resolve_discover_weekly_playlist(uri_buffer, sizeof(uri_buffer));
+  if (result <= 0) {
+    std::cout << "[DEBUG] Discover Weekly: bridge rootlist resolver failed " << result << std::endl;
+    return;
+  }
+
+  std::string discovered_uri(uri_buffer, result);
+  std::string discovered_id = SpotifyIdFromUri(discovered_uri, "playlist");
+  if (discovered_id.empty()) {
+    std::cout << "[DEBUG] Discover Weekly: bridge returned non-playlist URI "
+              << discovered_uri << std::endl;
+    return;
+  }
+
+  std::cout << "[DEBUG] Discover Weekly: bridge resolved " << discovered_uri << std::endl;
+  PrefWriteStr(discovered_uri.c_str(), "discover_weekly_uri");
+  AppendBridgePlaylistTracks(tracks, tsp, discovered_uri);
 }
 
 static std::string FindPlaylistBySearch(Tsp *tsp, const char *query, const char *preferred_name) {
@@ -1750,16 +1796,16 @@ static void BuildTracksForUri(std::vector<TspItem*> *tracks, Tsp *tsp, const std
     AppendSearchTracks(tracks, tsp, uri_str.substr(7), 50);
   } else if (uri_str.rfind("spotify:album:", 0) == 0) {
     AppendAlbumTracks(tracks, tsp, SpotifyIdFromUri(uri_str, "album"));
+  } else if (uri_str == "spotify:playlist-format:discover-weekly") {
+    AppendDiscoverWeeklyTracks(tracks, tsp, "format");
   } else if (uri_str.rfind("spotify:toplist:track:", 0) == 0) {
     std::string code = uri_str.substr(strlen("spotify:toplist:track:"));
     if (code == "discoverweekly" || code.rfind("discoverweekly:", 0) == 0) {
-      AppendCurrentPlaybackQueue(tracks, tsp);
       if (code.rfind("discoverweekly:", 0) == 0) {
         std::string playlist_id = code.substr(strlen("discoverweekly:"));
-        std::string context_uri = playlist_id == "format"
-            ? "spotify:playlist-format:discover-weekly"
-            : "spotify:playlist:" + playlist_id;
-        AppendResolvedContextTracks(tracks, tsp, context_uri);
+        AppendDiscoverWeeklyTracks(tracks, tsp, playlist_id);
+      } else {
+        AppendDiscoverWeeklyTracks(tracks, tsp, "");
       }
     } else if (const char *top_playlist_id = TopListPlaylistId(code)) {
       AppendPlaylistTracks(tracks, tsp, top_playlist_id);
@@ -1797,6 +1843,7 @@ static void BuildTracksForUri(std::vector<TspItem*> *tracks, Tsp *tsp, const std
 static bool IsGeneratedPlayableUri(const std::string &uri) {
   return uri.rfind("spotify:radio:", 0) == 0 ||
          uri.rfind("spotify:genre:", 0) == 0 ||
+         uri == "spotify:playlist-format:discover-weekly" ||
          uri == kTspUri_TrackRadio;
 }
 
@@ -2026,6 +2073,20 @@ static void PollThreadProc(Tsp *tsp) {
         long long now_ms = NowMonotonicMs();
         int local_predicted_pos = CurrentPlayerPositionMsLocked(tsp);
         bool command_in_flight = tsp->local_control_until_ms > now_ms;
+        bool expected_track_guard = has_valid_item &&
+                                    !tsp->local_expected_track_uri.empty() &&
+                                    tsp->local_expected_track_until_ms > now_ms;
+        bool suppress_expected_track_metadata = expected_track_guard &&
+                                                tsp->local_expected_track_uri != track_uri;
+        if (has_valid_item && expected_track_guard &&
+            tsp->local_expected_track_uri == track_uri) {
+          tsp->local_expected_track_uri.clear();
+          tsp->local_expected_track_until_ms = 0;
+        } else if (!expected_track_guard && tsp->local_expected_track_until_ms > 0 &&
+                   tsp->local_expected_track_until_ms <= now_ms) {
+          tsp->local_expected_track_uri.clear();
+          tsp->local_expected_track_until_ms = 0;
+        }
         bool suppress_play_state = command_in_flight && tsp->local_desired_playing != is_p;
         bool suppress_stopped_metadata = tsp->local_stopped && !is_p;
         bool bridge_owns_position = sp_playback_bridge_is_running() != 0;
@@ -2038,6 +2099,7 @@ static void PollThreadProc(Tsp *tsp) {
                                         !tsp->repeat &&
                                         NearTrackEndLocked(tsp, old_pos);
         bool suppress_metadata = suppress_stopped_metadata ||
+                                 suppress_expected_track_metadata ||
                                  stale_end_restart_update ||
                                  (command_in_flight &&
                                   ((tsp->has_now_playing && tsp->now_playing_item.uri != track_uri) ||
@@ -2076,6 +2138,7 @@ static void PollThreadProc(Tsp *tsp) {
           tsp->player_duration_ms = duration_ms;
           tsp->has_now_playing = true;
           tsp->local_stopped = false;
+          SyncPlayerListIndexToNowPlayingLocked(tsp);
           now_playing_changed = true;
         }
       } else {
@@ -2381,6 +2444,8 @@ TSP_PUBLIC TspError TspItemListLoad(TspItemList *tl, const char *uri, int load_o
   ClearItemList(tl);
   tl->total_length = 0;
   tl->dynamic_loading = false;
+  tl->loading_all_saved_tracks = false;
+  int load_generation = ++tl->load_generation;
   
   Tsp *tsp = g_global_tsp;
   if (!tsp || GetAccessToken(tsp).empty()) {
@@ -2391,11 +2456,68 @@ TSP_PUBLIC TspError TspItemListLoad(TspItemList *tl, const char *uri, int load_o
   if (uri_str == "spotify:collection:tracks") {
     tl->dynamic_loading = true;
     tl->total_length = -1;
+    tl->loading_all_saved_tracks = true;
     tl->items.clear();
-    std::thread([tl, tsp]() {
-      LoadSavedTracksPage(tl, tsp, 0, 50);
-      if (tsp->callback)
-        tsp->callback(tsp->callback_context, kTspCallbackEvent_ItemListChanged, tl, NULL);
+    std::thread([tl, tsp, load_generation]() {
+      const int page_size = 50;
+      const int pages_per_batch = 4;
+      int api_total = -1;
+      for (int batch_offset = 0;; batch_offset += page_size * pages_per_batch) {
+        if (tl->load_generation != load_generation)
+          break;
+        if (api_total >= 0 && batch_offset >= api_total)
+          break;
+
+        std::vector<SavedTracksPage> pages(pages_per_batch);
+        std::vector<std::thread> workers;
+        for (int i = 0; i < pages_per_batch; ++i) {
+          int offset = batch_offset + i * page_size;
+          if (api_total >= 0 && offset >= api_total)
+            break;
+          workers.emplace_back([tsp, offset, page_size, &pages, i]() {
+            pages[i] = FetchSavedTracksPage(tsp, offset, page_size);
+          });
+        }
+        for (auto &worker : workers)
+          worker.join();
+
+        if (tl->load_generation != load_generation) {
+          for (auto &page : pages)
+            DeleteSavedTracksPage(&page);
+          break;
+        }
+
+        bool should_stop = workers.empty();
+        bool stored_any_page = false;
+        for (int i = 0; i < (int)workers.size(); ++i) {
+          if (pages[i].total > 0)
+            api_total = pages[i].total;
+          StoreSavedTracksPage(tl, &pages[i], load_generation);
+          if (tl->load_generation != load_generation) {
+            for (int j = i + 1; j < (int)workers.size(); ++j)
+              DeleteSavedTracksPage(&pages[j]);
+            break;
+          }
+
+          if (tsp->callback)
+            tsp->callback(tsp->callback_context, kTspCallbackEvent_ItemListChanged, tl, NULL);
+
+          stored_any_page = stored_any_page || pages[i].fetched > 0;
+          if (pages[i].fetched < page_size ||
+              (api_total >= 0 && pages[i].offset + pages[i].fetched >= api_total)) {
+            should_stop = true;
+          }
+        }
+
+        if (tl->load_generation != load_generation)
+          break;
+        if (should_stop || !stored_any_page)
+          break;
+      }
+      if (tl->load_generation == load_generation) {
+        tl->dynamic_loading = false;
+        tl->loading_all_saved_tracks = false;
+      }
     }).detach();
     return kTspErrorOk;
   }
@@ -2412,9 +2534,14 @@ TSP_PUBLIC TspError TspItemListLoad(TspItemList *tl, const char *uri, int load_o
   }
 
   std::vector<std::string> radio_seed_uris = tl->radio_seed_uris;
-  std::thread([tl, tsp, uri_str, playlist_id, radio_seed_uris]() {
+  std::thread([tl, tsp, uri_str, playlist_id, radio_seed_uris, load_generation]() {
     std::vector<TspItem*> tracks;
     BuildTracksForUri(&tracks, tsp, uri_str, playlist_id, radio_seed_uris);
+    if (tl->load_generation != load_generation) {
+      for (auto *track : tracks)
+        delete track;
+      return;
+    }
     std::cout << "[DEBUG] TspItemListLoad: " << uri_str << " produced "
               << tracks.size() << " tracks" << std::endl;
 
@@ -2431,32 +2558,9 @@ TSP_PUBLIC TspError TspItemListLoad(TspItemList *tl, const char *uri, int load_o
 TSP_PUBLIC TspError TspItemListLoadRange(TspItemList *tl, int first_item, int num_items) {
   if (!tl || !tl->dynamic_loading || tl->uri != "spotify:collection:tracks")
     return kTspErrorOk;
-  Tsp *tsp = g_global_tsp;
-  if (!tsp || tsp->access_token.empty())
-    return kTspErrorOk;
-
-  int start = first_item - 10;
-  if (start < 0)
-    start = 0;
-  int end = first_item + num_items + 20;
-  if (tl->total_length > 0 && end > tl->total_length)
-    end = tl->total_length;
-  int page_start = (start / 50) * 50;
-  int page_end = ((end + 49) / 50) * 50;
-  for (int offset = page_start; offset < page_end; offset += 50) {
-    bool needs_page = offset >= (int)tl->items.size();
-    for (int i = offset; !needs_page && i < offset + 50 && i < (int)tl->items.size(); ++i) {
-      if (!tl->items[i])
-        needs_page = true;
-    }
-    if (!needs_page)
-      continue;
-    std::thread([tl, tsp, offset]() {
-      LoadSavedTracksPage(tl, tsp, offset, 50);
-      if (tsp->callback)
-        tsp->callback(tsp->callback_context, kTspCallbackEvent_ItemListChanged, tl, NULL);
-    }).detach();
-  }
+  // Liked Songs are compacted while a background loader fetches all Spotify API
+  // pages. UI indices no longer map 1:1 to Spotify offsets, so scroll-driven
+  // range loading would duplicate or skip items.
   return kTspErrorOk;
 }
 
