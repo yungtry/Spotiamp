@@ -1339,7 +1339,7 @@ static void AppendResolvedContextTracks(std::vector<TspItem*> *tracks, Tsp *tsp,
 
   for (size_t start = 0; start < ids.size(); start += 10) {
     std::string joined;
-    size_t end = std::min(start + 10, ids.size());
+    size_t end = start + 10 < ids.size() ? start + 10 : ids.size();
     for (size_t i = start; i < end; ++i) {
       if (!joined.empty()) joined += ',';
       joined += ids[i];
