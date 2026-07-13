@@ -88,6 +88,7 @@ extern int g_num_drag_windows;
 extern bool g_drag_sizing;
 
 int FindConnectedWindows(PlatformWindow *start, PlatformWindow **ws, int mask);
+int FindConnectedVisibleWindows(PlatformWindow *start, PlatformWindow **ws, int mask);
 void SnapToScreenEdges(PlatformWindow **ws, int nw, int *dxp, int *dyp);
 
 void HandleWindowResized(PlatformWindow *wnd, int w, int h);

@@ -132,20 +132,29 @@ void SnapToScreenEdges(PlatformWindow **ws, int nw, int *dxp, int *dyp) {
   if (data.besty != 10) *dyp = dy - data.besty; 
 }
 
-int FindConnectedWindows(PlatformWindow *start, PlatformWindow **ws, int mask) {
+static int FindConnectedWindowsInternal(PlatformWindow *start, PlatformWindow **ws,
+                                        int mask, bool visible_only) {
   int n;
   ws[0] = start;
   n = 1;
   for(int i = 0; i < n; i++) {
     // Find all neighbors to w[i] that are not already in the set
     for(PlatformWindow *w = g_platform_windows; w; w = w->next()) {
-      if (!HasWindow(ws, n, w)) {
+      if ((!visible_only || w->visible()) && !HasWindow(ws, n, w)) {
         if (IsNeighbour(ws[i]->screen_rect(), w->screen_rect()) & mask)
           ws[n++] = w; 
       }
     }
   }
   return n;
+}
+
+int FindConnectedWindows(PlatformWindow *start, PlatformWindow **ws, int mask) {
+  return FindConnectedWindowsInternal(start, ws, mask, false);
+}
+
+int FindConnectedVisibleWindows(PlatformWindow *start, PlatformWindow **ws, int mask) {
+  return FindConnectedWindowsInternal(start, ws, mask, true);
 }
 
 

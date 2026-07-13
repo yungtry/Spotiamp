@@ -94,6 +94,10 @@ private:
   static void MoveAllWindows();
   static void FindMonitors();
   static void SaveDraggedWindowPositions();
+  static void UpdateSystemWindowGrouping();
+  static void MinimizeConnectedGroup(PlatformWindow *window);
+  static void MinimizeAllApplicationWindows(PlatformWindow *primary_window);
+  static void RestoreConnectedGroup(PlatformWindow *window);
   
   bool need_repaint_;
   SDL_Window *window_;

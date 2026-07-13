@@ -15,6 +15,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <wincodec.h>
+#include "SDL_syswm.h"
 #undef DrawText
 #undef GetWindowText
 #undef SetWindowText
@@ -66,7 +67,41 @@ static int g_drag_start_width;
 static int g_drag_start_height;
 static PlatformWindow *g_captured_window = NULL;
 static Uint32 g_ignore_left_button_up_window_id = 0;
+struct MinimizedWindowGroup {
+  PlatformWindow *members[16];
+  int count;
+};
+static std::vector<MinimizedWindowGroup> g_minimized_window_groups;
 static bool HandleActiveMenuEvent(SDL_Event *event);
+
+static bool WindowIsInGroup(PlatformWindow *window, PlatformWindow **group, int count) {
+  for (int i = 0; i < count; ++i) {
+    if (group[i] == window)
+      return true;
+  }
+  return false;
+}
+
+static int FindMinimizedWindowGroup(PlatformWindow *window) {
+  for (int i = 0; i < (int)g_minimized_window_groups.size(); ++i) {
+    MinimizedWindowGroup &group = g_minimized_window_groups[i];
+    if (WindowIsInGroup(window, group.members, group.count))
+      return i;
+  }
+  return -1;
+}
+
+#if defined(_WIN32)
+static HWND NativeWindowHandle(SDL_Window *window) {
+  if (!window)
+    return NULL;
+  SDL_SysWMinfo info;
+  SDL_VERSION(&info.version);
+  if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS)
+    return NULL;
+  return info.info.win.window;
+}
+#endif
 
 static bool PlatformDirectoryExists(const std::string &path) {
   struct stat st;
@@ -195,6 +230,11 @@ void PlatformWindow::UpdateActiveWindowDrag() {
 PlatformWindow::PlatformWindow() {
   active_window_ = true;
   need_repaint_ = true;
+  window_ = NULL;
+  surface_ = NULL;
+  window_id_ = 0;
+  drag_start_x_ = 0;
+  drag_start_y_ = 0;
 }
 
 PlatformWindow::~PlatformWindow() {
@@ -227,6 +267,7 @@ void PlatformWindow::Create(PlatformWindow *owner_window) {
   screen_rect_.top = y;
   screen_rect_.right = x + w;
   screen_rect_.bottom = y + h;
+  UpdateSystemWindowGrouping();
 }
 
 void PlatformWindow::Blit(int dx, int dy, int w, int h, Bitmap *src, int sx, int sy) {
@@ -393,7 +434,77 @@ void PlatformWindow::Repaint() {
 }
 
 void PlatformWindow::Minimize() {
+  if (this == g_main_window)
+    MinimizeAllApplicationWindows(this);
+  else
+    MinimizeConnectedGroup(this);
   SDL_MinimizeWindow(window_);
+}
+
+void PlatformWindow::MinimizeConnectedGroup(PlatformWindow *window) {
+  if (!window || FindMinimizedWindowGroup(window) >= 0)
+    return;
+
+  MinimizedWindowGroup group;
+  group.count = FindConnectedVisibleWindows(window, group.members, 0xF);
+  g_minimized_window_groups.push_back(group);
+  MinimizedWindowGroup &saved_group = g_minimized_window_groups.back();
+  for (int i = 0; i < saved_group.count; ++i) {
+    PlatformWindow *member = saved_group.members[i];
+    if (member != window && member->window_) {
+#if defined(__APPLE__)
+      // macOS animates every separately minimized SDL window into the Dock.
+      // Hide the companions and minimize only the window that represents the
+      // connected cluster, so the group behaves like one native window.
+      SDL_HideWindow(member->window_);
+#else
+      SDL_MinimizeWindow(member->window_);
+#endif
+    }
+  }
+}
+
+void PlatformWindow::MinimizeAllApplicationWindows(PlatformWindow *primary_window) {
+  if (!primary_window)
+    return;
+
+  MinimizeConnectedGroup(primary_window);
+  for (PlatformWindow *window = g_platform_windows; window; window = window->next_) {
+    if (!window->visible_ || !window->window_ || FindMinimizedWindowGroup(window) >= 0)
+      continue;
+    MinimizeConnectedGroup(window);
+    SDL_MinimizeWindow(window->window_);
+  }
+}
+
+void PlatformWindow::RestoreConnectedGroup(PlatformWindow *window) {
+  int group_index = window ? FindMinimizedWindowGroup(window) : -1;
+  if (group_index < 0)
+    return;
+
+  MinimizedWindowGroup group = g_minimized_window_groups[group_index];
+  g_minimized_window_groups.erase(g_minimized_window_groups.begin() + group_index);
+
+  for (int i = 0; i < group.count; ++i) {
+    PlatformWindow *member = group.members[i];
+    if (!member->window_ || !member->visible_)
+      continue;
+#if defined(__APPLE__)
+    if (member != window) {
+      SDL_ShowWindow(member->window_);
+      member->surface_ = SDL_GetWindowSurface(member->window_);
+      member->need_repaint_ = true;
+      member->PlatformPaint();
+    }
+#else
+      SDL_RestoreWindow(member->window_);
+#endif
+  }
+#if defined(__APPLE__)
+  if (window->window_)
+    SDL_RaiseWindow(window->window_);
+#endif
+  UpdateSystemWindowGrouping();
 }
 
 void PlatformWindow::InitDraggingOrSizing() {
@@ -439,10 +550,19 @@ void PlatformWindow::HandleEvent(SDL_Event *event) {
 
   switch(event->type) {
   case SDL_WINDOWEVENT: {
-    if (event->window.type == SDL_WINDOWEVENT_EXPOSED) {
-      PlatformWindow *w = FromID(event->window.windowID);
-      if (w) w->Repaint();
+    PlatformWindow *w = FromID(event->window.windowID);
+    if (!w)
+      break;
+    if (event->window.event == SDL_WINDOWEVENT_EXPOSED)
+      w->Repaint();
+    else if (event->window.event == SDL_WINDOWEVENT_MINIMIZED) {
+      if (w == g_main_window)
+        MinimizeAllApplicationWindows(w);
+      else
+        MinimizeConnectedGroup(w);
     }
+    else if (event->window.event == SDL_WINDOWEVENT_RESTORED)
+      RestoreConnectedGroup(w);
     break;
   }
   case SDL_KEYDOWN:
@@ -596,11 +716,79 @@ void PlatformWindow::SaveDraggedWindowPositions() {
     if (g_drag_windows[i])
       g_drag_windows[i]->SavePosition();
   }
+  UpdateSystemWindowGrouping();
+}
 
+void PlatformWindow::UpdateSystemWindowGrouping() {
+#if defined(_WIN32)
+  if (!g_main_window || !g_main_window->window_)
+    return;
+
+  for (PlatformWindow *window = g_platform_windows; window; window = window->next_) {
+    if (!window->window_ || !window->owner_)
+      continue;
+
+    HWND handle = NativeWindowHandle(window->window_);
+    if (!handle)
+      continue;
+
+    PlatformWindow *component[16];
+    int component_count = window->visible_
+                              ? FindConnectedVisibleWindows(window, component, 0xF)
+                              : 0;
+    PlatformWindow *representative = window;
+    for (int i = 0; i < component_count; ++i) {
+      if (component[i] == g_main_window) {
+        representative = g_main_window;
+        break;
+      }
+      if (component[i]->id_ < representative->id_)
+        representative = component[i];
+    }
+
+    bool grouped = component_count > 1 && representative != window;
+    HWND owner_handle = grouped ? NativeWindowHandle(representative->window_) : NULL;
+    if (grouped && !owner_handle)
+      continue;
+
+    bool owner_matches = GetWindow(handle, GW_OWNER) == owner_handle;
+    LONG_PTR ex_style = GetWindowLongPtr(handle, GWL_EXSTYLE);
+    bool style_is_grouped = (ex_style & WS_EX_TOOLWINDOW) != 0 &&
+                            (ex_style & WS_EX_APPWINDOW) == 0;
+    if (owner_matches && grouped == style_is_grouped)
+      continue;
+
+    bool was_visible = IsWindowVisible(handle) != FALSE;
+    bool was_foreground = GetForegroundWindow() == handle;
+    if (was_visible)
+      ShowWindow(handle, SW_HIDE);
+
+    SetWindowLongPtr(handle, GWLP_HWNDPARENT,
+                     grouped ? reinterpret_cast<LONG_PTR>(owner_handle) : 0);
+    if (grouped) {
+      ex_style &= ~WS_EX_APPWINDOW;
+      ex_style |= WS_EX_TOOLWINDOW;
+    } else {
+      ex_style &= ~WS_EX_TOOLWINDOW;
+      ex_style |= WS_EX_APPWINDOW;
+    }
+    SetWindowLongPtr(handle, GWL_EXSTYLE, ex_style);
+    SetWindowPos(handle, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (was_visible) {
+      ShowWindow(handle, was_foreground ? SW_SHOW : SW_SHOWNOACTIVATE);
+      if (was_foreground)
+        SetForegroundWindow(handle);
+    }
+  }
+#endif
 }
 
 void PlatformWindow::VisibleChanged() {
   if (!window_) return;
+  if (this != g_main_window || visible_)
+    UpdateSystemWindowGrouping();
   if (visible_) {
     SDL_ShowWindow(window_);
     surface_ = SDL_GetWindowSurface(window_);
@@ -1411,6 +1599,46 @@ static int MenuTextWidth(const std::string &text) {
   return (int)text.size() * 6;
 }
 
+static std::string ClipMenuTitle(const std::string &title, int available_width) {
+  int max_chars = IntMax(0, available_width / 6);
+  if ((int)title.size() <= max_chars)
+    return title;
+  if (max_chars <= 3)
+    return std::string(max_chars, '.');
+  return title.substr(0, max_chars - 3) + "...";
+}
+
+static SDL_Rect MenuDisplayBoundsAt(int x, int y) {
+  SDL_Rect usable = {0, 0, 1440, 900};
+  int display_count = SDL_GetNumVideoDisplays();
+  for (int display = 0; display < display_count; ++display) {
+    SDL_Rect display_bounds;
+    if (SDL_GetDisplayBounds(display, &display_bounds) != 0)
+      continue;
+    if (x >= display_bounds.x && x < display_bounds.x + display_bounds.w &&
+        y >= display_bounds.y && y < display_bounds.y + display_bounds.h) {
+      SDL_GetDisplayUsableBounds(display, &usable);
+      return usable;
+    }
+  }
+  SDL_GetDisplayUsableBounds(0, &usable);
+  return usable;
+}
+
+static int MenuMaxVisibleRows(const SDL_Rect &bounds, int row_h) {
+  const int kMaxRows = 28;
+  int available_rows = IntMax(1, (bounds.h - 24) / row_h);
+  return IntMin(kMaxRows, available_rows);
+}
+
+static int MenuPopupWidth(int content_width, const SDL_Rect &bounds) {
+  const int kMinWidth = 150;
+  const int kMaxWidth = 420;
+  int available_width = IntMax(kMinWidth, bounds.w - 24);
+  return IntMin(IntMax(content_width + 12, kMinWidth),
+                IntMin(kMaxWidth, available_width));
+}
+
 static Uint32 GetSurfacePixel(SDL_Surface *surface, int x, int y) {
   int bpp = surface->format->BytesPerPixel;
   Uint8 *p = (Uint8*)surface->pixels + y * surface->pitch + x * bpp;
@@ -1522,6 +1750,8 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
   Uint32 sep = SDL_MapRGB(logical_surface->format, 0x9c, 0x9c, 0x94);
   Uint32 header = SDL_MapRGB(logical_surface->format, 0xd7, 0xd7, 0xcf);
   Uint32 hover_bg = SDL_MapRGB(logical_surface->format, 0x24, 0x63, 0xa8);
+  Uint32 scroll_thumb = SDL_MapRGB(logical_surface->format, 0x70, 0x70, 0x6b);
+  bool scrollable = (int)g_menu_items.size() > visible_rows;
 
   SDL_FillRect(logical_surface, NULL, bg);
   SDL_Rect top = {0, 0, width, 1};
@@ -1556,14 +1786,31 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
       SDL_FillRect(logical_surface, &rect, header);
     }
 
-    std::string title = MenuDisplayTitle(item);
     int text_x = 8 + item.depth * 14;
+    int text_right_padding = scrollable ? 16 : 8;
+    std::string title = ClipMenuTitle(MenuDisplayTitle(item),
+                                      width - text_x - text_right_padding);
     int text_y = y + (row_h - 6) / 2;
     Uint8 c = selectable ? 0x00 : 0x66;
     if (selected)
       DrawMenuText(logical_surface, text_x, text_y, title, 0xff, 0xff, 0xff);
     else
       DrawMenuText(logical_surface, text_x, text_y, title, c, c, c);
+  }
+
+  if (scrollable) {
+    SDL_Rect track = {width - 9, 3, 5, visible_rows * row_h - 4};
+    SDL_FillRect(logical_surface, &track, header);
+
+    int item_count = (int)g_menu_items.size();
+    int max_scroll = item_count - visible_rows;
+    int thumb_h = IntMax(12, track.h * visible_rows / item_count);
+    thumb_h = IntMin(thumb_h, track.h);
+    int thumb_y = track.y;
+    if (max_scroll > 0)
+      thumb_y += (track.h - thumb_h) * scroll / max_scroll;
+    SDL_Rect thumb = {track.x, thumb_y, track.w, thumb_h};
+    SDL_FillRect(logical_surface, &thumb, scroll_thumb);
   }
 
   if (logical_surface != surface) {
@@ -1604,14 +1851,13 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
       max_width = width;
   }
 
-  SDL_Rect bounds = {0, 0, 1440, 900};
-  SDL_GetDisplayUsableBounds(0, &bounds);
+  SDL_Rect bounds = MenuDisplayBoundsAt(screen_x, screen_y);
   int visible_rows = (int)g_menu_items.size();
-  int max_rows = IntMax(1, (bounds.h - 24) / row_h);
+  int max_rows = MenuMaxVisibleRows(bounds, row_h);
   if (visible_rows > max_rows)
     visible_rows = max_rows;
 
-  int popup_w = IntMin(IntMax(max_width + 12, 150), IntMax(150, bounds.w - 24));
+  int popup_w = MenuPopupWidth(max_width, bounds);
   int popup_h = visible_rows * row_h + 2;
   if (screen_x + popup_w > bounds.x + bounds.w)
     screen_x = bounds.x + bounds.w - popup_w;
@@ -1705,8 +1951,14 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
         break;
       break;
     case SDL_WINDOWEVENT:
-      if (event.window.windowID == popup_id && event.window.event == SDL_WINDOWEVENT_EXPOSED)
-        PaintPopupMenu(popup, popup_w, row_h, visible_rows, scroll, hover);
+      if (event.window.windowID == popup_id) {
+        if (event.window.event == SDL_WINDOWEVENT_EXPOSED)
+          PaintPopupMenu(popup, popup_w, row_h, visible_rows, scroll, hover);
+        else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                 event.window.event == SDL_WINDOWEVENT_HIDDEN ||
+                 event.window.event == SDL_WINDOWEVENT_MINIMIZED)
+          done = true;
+      }
       break;
     default:
       break;
@@ -1756,15 +2008,14 @@ static bool OpenActiveMenu(PlatformWindow *window, int x, int y, std::function<v
       max_width = width;
   }
 
-  SDL_Rect bounds = {0, 0, 1440, 900};
-  SDL_GetDisplayUsableBounds(0, &bounds);
+  SDL_Rect bounds = MenuDisplayBoundsAt(screen_x, screen_y);
   g_active_menu_row_h = 17;
   g_active_menu_visible_rows = (int)g_menu_items.size();
-  int max_rows = IntMax(1, (bounds.h - 24) / g_active_menu_row_h);
+  int max_rows = MenuMaxVisibleRows(bounds, g_active_menu_row_h);
   if (g_active_menu_visible_rows > max_rows)
     g_active_menu_visible_rows = max_rows;
 
-  g_active_menu_width = IntMin(IntMax(max_width + 12, 150), IntMax(150, bounds.w - 24));
+  g_active_menu_width = MenuPopupWidth(max_width, bounds);
   int popup_h = g_active_menu_visible_rows * g_active_menu_row_h + 2;
   if (screen_x + g_active_menu_width > bounds.x + bounds.w)
     screen_x = bounds.x + bounds.w - g_active_menu_width;
@@ -1873,7 +2124,10 @@ static bool HandleActiveMenuEvent(SDL_Event *event) {
       if (event->window.event == SDL_WINDOWEVENT_EXPOSED) {
         PaintPopupMenu(g_active_menu_popup, g_active_menu_width, g_active_menu_row_h,
                        g_active_menu_visible_rows, g_active_menu_scroll, g_active_menu_hover);
-      } else if (event->window.event == SDL_WINDOWEVENT_CLOSE) {
+      } else if (event->window.event == SDL_WINDOWEVENT_CLOSE ||
+                 event->window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                 event->window.event == SDL_WINDOWEVENT_HIDDEN ||
+                 event->window.event == SDL_WINDOWEVENT_MINIMIZED) {
         CloseActiveMenu(0, false);
       }
       return true;
