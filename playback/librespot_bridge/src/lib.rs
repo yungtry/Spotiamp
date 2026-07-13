@@ -555,7 +555,9 @@ pub extern "C" fn sp_playback_bridge_start(
         Ok(new_bridge) => {
             *bridge = Some(new_bridge);
             if !error_buf.is_null() && error_buf_size > 0 {
-                unsafe { *error_buf = 0; }
+                unsafe {
+                    *error_buf = 0;
+                }
             }
             0
         }
@@ -732,6 +734,50 @@ pub extern "C" fn sp_playback_bridge_load_context(
         load_options(start_playing, position_ms, playing_track),
     );
     bridge.spirc.load(request).map(|_| 0).unwrap_or(-4)
+}
+
+#[no_mangle]
+pub extern "C" fn sp_playback_bridge_resolve_context_tracks(
+    context_uri: *const c_char,
+    buffer: *mut c_char,
+    buffer_size: usize,
+) -> i32 {
+    let Some(context_uri) = cstr_to_string(context_uri) else {
+        return -1;
+    };
+    if buffer.is_null() || buffer_size == 0 {
+        return -2;
+    }
+
+    let bridge = GLOBAL_BRIDGE.lock().unwrap();
+    let result = bridge.as_ref().ok_or(()).and_then(|bridge| {
+        bridge
+            .runtime
+            .block_on(bridge._session.spclient().get_context(&context_uri))
+            .map_err(|_| ())
+    });
+    let Ok(context) = result else {
+        return -3;
+    };
+
+    let mut output = String::new();
+    for page in context.pages {
+        for track in page.tracks {
+            let uri = track.uri();
+            if uri.starts_with("spotify:track:") {
+                output.push_str(uri);
+                output.push('\n');
+            }
+        }
+    }
+    if output.len() + 1 > buffer_size {
+        return -4;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(output.as_ptr(), buffer.cast::<u8>(), output.len());
+        *buffer.add(output.len()) = 0;
+    }
+    output.len() as i32
 }
 
 #[no_mangle]

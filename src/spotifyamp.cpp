@@ -102,64 +102,47 @@ static const char * const toplistnames[][2] = {
 static const char kDiscoverWeeklyPseudoUri[] = "spotify:toplist:track:discoverweekly";
 static const char kDiscoverWeeklyPref[] = "discover_weekly_uri";
 
-static std::string TrimString(const std::string &s) {
-  size_t start = 0;
-  while (start < s.size() && isspace((unsigned char)s[start]))
-    start++;
-  size_t end = s.size();
-  while (end > start && isspace((unsigned char)s[end - 1]))
-    end--;
-  return s.substr(start, end - start);
-}
-
-static bool IsSpotifyIdChar(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-}
-
 static std::string NormalizeSpotifyPlaylistUri(const std::string &input) {
-  std::string value = TrimString(input);
-  const char spotify_prefix[] = "spotify:playlist:";
-  if (value.rfind(spotify_prefix, 0) == 0) {
-    size_t id_start = strlen(spotify_prefix);
-    size_t id_end = id_start;
-    while (id_end < value.size() && IsSpotifyIdChar(value[id_end]))
-      id_end++;
-    if (id_end > id_start)
-      return value.substr(0, id_end);
+  const char uri_prefix[] = "spotify:playlist:";
+  size_t start = input.find(uri_prefix);
+  if (start != std::string::npos)
+    start += strlen(uri_prefix);
+  else {
+    const char web_prefix[] = "/playlist/";
+    start = input.find(web_prefix);
+    if (start != std::string::npos)
+      start += strlen(web_prefix);
+    else
+      start = 0;
   }
+  size_t end = start;
+  while (end < input.size() && isalnum((unsigned char)input[end]))
+    ++end;
+  return end > start ? std::string(uri_prefix) + input.substr(start, end - start) : "";
+}
 
-  const char path_marker[] = "/playlist/";
-  size_t pos = value.find(path_marker);
-  if (pos != std::string::npos) {
-    size_t id_start = pos + strlen(path_marker);
-    size_t id_end = id_start;
-    while (id_end < value.size() && IsSpotifyIdChar(value[id_end]))
-      id_end++;
-    if (id_end > id_start)
-      return std::string(spotify_prefix) + value.substr(id_start, id_end - id_start);
-  }
+static std::string ResolveDiscoverWeeklyUri(Tsp *tsp, PlatformWindow *parent) {
+  std::string saved = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
+  if (!saved.empty())
+    return saved;
 
-  bool id_only = !value.empty();
-  for (char c : value) {
-    if (!IsSpotifyIdChar(c)) {
-      id_only = false;
-      break;
+  for (int i = 0; i < TspGetRootlistCount(tsp); ++i) {
+    if (stricmp(TspGetRootlistName(tsp, i), "Discover Weekly") == 0) {
+      saved = NormalizeSpotifyPlaylistUri(TspGetRootlistUri(tsp, i));
+      if (!saved.empty()) {
+        PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
+        return saved;
+      }
     }
   }
-  if (id_only && value.size() >= 10)
-    return std::string(spotify_prefix) + value;
-  return "";
-}
 
-static std::string SpotifyPlaylistIdFromUri(const std::string &uri) {
-  const char spotify_prefix[] = "spotify:playlist:";
-  if (uri.rfind(spotify_prefix, 0) != 0)
-    return "";
-  size_t id_start = strlen(spotify_prefix);
-  size_t id_end = id_start;
-  while (id_end < uri.size() && IsSpotifyIdChar(uri[id_end]))
-    id_end++;
-  return id_end > id_start ? uri.substr(id_start, id_end - id_start) : "";
+  std::string input = ShowTextInputDialog(
+      parent, "Discover Weekly",
+      "Paste the Discover Weekly playlist link from Spotify. Spotiamp only needs this once.", "");
+  saved = NormalizeSpotifyPlaylistUri(input);
+  if (!saved.empty())
+    PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
+  return saved;
 }
 
 int MyWavPush(void *context, int flags,
@@ -1376,52 +1359,20 @@ bool MainWindow::HandleAppCommandHotKeys(int cmd, int keys) {
   }
 }
 
-static std::string ResolveDiscoverWeeklyUri(PlatformWindow *parent) {
-  std::string saved = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
-  if (!saved.empty()) {
-    PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
-    std::cout << "[DEBUG] Discover Weekly: using saved playlist " << saved
-              << " from " << GetIniFilePath() << std::endl;
-    return saved;
-  }
-
-  std::string message =
-    "Spotify no longer exposes Discover Weekly through the public API.\n\n"
-    "Open Discover Weekly in Spotify, choose Share, copy the full playlist link, "
-    "and paste it here once. Spotiamp accepts open.spotify.com playlist links, "
-    "spotify:playlist URIs, or raw playlist IDs.\n\n"
-    "It will be saved to:\n";
-  message += GetIniFilePath();
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    std::string input = ShowTextInputDialog(parent, "Discover Weekly", message.c_str(), "");
-    std::string uri = NormalizeSpotifyPlaylistUri(input);
-    if (!uri.empty()) {
-      PrefWriteStr(uri.c_str(), kDiscoverWeeklyPref);
-      std::cout << "[DEBUG] Discover Weekly: saved playlist " << uri
-                << " to " << GetIniFilePath() << std::endl;
-      return uri;
-    }
-    if (TrimString(input).empty()) {
-      std::cout << "[DEBUG] Discover Weekly: setup cancelled" << std::endl;
-      return "";
-    }
-    std::cout << "[DEBUG] Discover Weekly: invalid playlist link: " << input << std::endl;
-  }
-  return "";
-}
-
 void MainWindow::OpenUri(const char *query, int track_to_play) {
   if (!query || !query[0])
     return;
   if (strcmp(query, kDiscoverWeeklyPseudoUri) == 0) {
-    static std::string discover_weekly_uri;
-    discover_weekly_uri = ResolveDiscoverWeeklyUri(this);
-    if (discover_weekly_uri.empty())
+    std::string discover_uri = ResolveDiscoverWeeklyUri(tsp_, this);
+    if (discover_uri.empty())
       return;
-    std::cout << "[DEBUG] Discover Weekly: playing Spotify context directly" << std::endl;
-    itemlist_in_sync_with_player_ = true;
-    TspPlayerPlayContext(tsp_, discover_weekly_uri.c_str(), NULL, -1);
-    query = discover_weekly_uri.c_str();
+    std::cout << "[DEBUG] Discover Weekly: starting context " << discover_uri << std::endl;
+    itemlist_in_sync_with_player_ = false;
+    pending_queue_uri_.clear();
+    discover_queue_uri_ = std::string(kDiscoverWeeklyPseudoUri) + ":" +
+                          discover_uri.substr(strlen("spotify:playlist:"));
+    waiting_for_discover_playback_ = true;
+    TspPlayerPlayContext(tsp_, discover_uri.c_str(), NULL, 0);
     return;
   }
   if (memcmp(query, "spotify:", 8) != 0 && query[0] != '<')
@@ -1500,13 +1451,6 @@ void MainWindow::ShowEjectMenu() {
       menu.AddSeparator();
     else {
       bool active = toplistnames[i][1] && strcmp(toplistnames[i][1], cur_uri.c_str()) == 0;
-      if (toplistnames[i][1] && strcmp(toplistnames[i][1], kDiscoverWeeklyPseudoUri) == 0) {
-        std::string discover_uri = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
-        std::string discover_id = SpotifyPlaylistIdFromUri(discover_uri);
-        active = active || (!discover_uri.empty() && discover_uri == cur_uri) ||
-                 (!discover_id.empty() &&
-                  cur_uri == std::string(kDiscoverWeeklyPseudoUri) + ":" + discover_id);
-      }
       menu.AddRadioItem(CMD_TOPLIST + i, toplistnames[i][0], active);
     }
   }
@@ -2883,6 +2827,12 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
     } else if (event == kTspCallbackEvent_AutoComplete) {
       AutoCompleteCopy();
     } else if (event == kTspCallbackEvent_NowPlayingChanged || event == kTspCallbackEvent_RemoteUpdate) {
+      if (w->waiting_for_discover_playback_) {
+        w->waiting_for_discover_playback_ = false;
+        w->pending_queue_uri_ = w->discover_queue_uri_;
+        std::cout << "[DEBUG] Discover Weekly: playback started; loading Spotify queue" << std::endl;
+        TspItemListLoad(w->item_list(), w->discover_queue_uri_.c_str(), 0);
+      }
       w->ResetScroll();
       w->Repaint();
       w->SaveNowPlaying();
@@ -2905,6 +2855,11 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
       w->Repaint();
     } else if (event == kTspCallbackEvent_ItemListChanged) {
       if (source == w->item_list()) {
+        if (!w->pending_queue_uri_.empty() &&
+            w->pending_queue_uri_ == TspItemListGetUri(w->item_list())) {
+          w->pending_queue_uri_.clear();
+          TspItemListCopyFrom(w->player_list(), w->item_list());
+        }
         playlist_window.FixupScroll();
         playlist_window.Repaint();
       } else if (source == w->player_list() && w->itemlist_in_sync_with_player_) {

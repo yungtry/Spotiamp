@@ -1287,6 +1287,86 @@ static void AppendTrackObjects(std::vector<TspItem*> *tracks,
   }
 }
 
+static void AppendCurrentPlaybackQueue(std::vector<TspItem*> *tracks, Tsp *tsp) {
+  std::string response = HttpGet("https://api.spotify.com/v1/me/player/queue", GetAccessToken(tsp));
+  if (response.empty()) {
+    std::cout << "[DEBUG] Discover Weekly: queue endpoint status " << LastHttpStatus() << std::endl;
+    return;
+  }
+
+  std::string current = JsonExtractObjectShallow(response, "currently_playing");
+  if (!current.empty() && JsonExtractStringShallow(current, "type") == "track") {
+    TspItem *item = CreateTrackItemFromJson(current);
+    if (item)
+      tracks->push_back(item);
+  }
+
+  auto queued = JsonExtractObjectsFromArrayString(JsonExtractArrayStringShallow(response, "queue"));
+  for (const auto &object : queued) {
+    if (JsonExtractStringShallow(object, "type") != "track")
+      continue;
+    TspItem *item = CreateTrackItemFromJson(object);
+    if (item)
+      tracks->push_back(item);
+  }
+  std::cout << "[DEBUG] Discover Weekly: loaded " << tracks->size()
+            << " tracks from the current Spotify queue" << std::endl;
+}
+
+static void AppendResolvedContextTracks(std::vector<TspItem*> *tracks, Tsp *tsp,
+                                        const std::string &context_uri) {
+  char uri_buffer[16384];
+  int result = sp_playback_bridge_resolve_context_tracks(
+      context_uri.c_str(), uri_buffer, sizeof(uri_buffer));
+  if (result <= 0) {
+    std::cout << "[DEBUG] Discover Weekly: librespot context resolve failed " << result << std::endl;
+    return;
+  }
+
+  std::vector<std::string> ids;
+  std::string uris(uri_buffer, result);
+  size_t pos = 0;
+  while (pos < uris.size()) {
+    size_t end = uris.find('\n', pos);
+    std::string uri = uris.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    std::string id = SpotifyIdFromUri(uri, "track");
+    if (!id.empty())
+      ids.push_back(id);
+    if (end == std::string::npos)
+      break;
+    pos = end + 1;
+  }
+
+  for (size_t start = 0; start < ids.size(); start += 10) {
+    std::string joined;
+    size_t end = std::min(start + 10, ids.size());
+    for (size_t i = start; i < end; ++i) {
+      if (!joined.empty()) joined += ',';
+      joined += ids[i];
+    }
+    std::string response = HttpGet("https://api.spotify.com/v1/tracks?ids=" + joined,
+                                   GetAccessToken(tsp));
+    auto objects = JsonExtractArray(response, "tracks");
+    for (const auto &object : objects) {
+      std::string uri = JsonExtractStringShallow(object, "uri");
+      bool already_present = false;
+      for (const auto *track : *tracks) {
+        if (track && track->uri == uri) {
+          already_present = true;
+          break;
+        }
+      }
+      if (!already_present) {
+        TspItem *item = CreateTrackItemFromJson(object);
+        if (item)
+          tracks->push_back(item);
+      }
+    }
+  }
+  std::cout << "[DEBUG] Discover Weekly: loaded " << tracks->size()
+            << " tracks from the librespot context" << std::endl;
+}
+
 static void AppendPlaylistItemObjects(std::vector<TspItem*> *tracks,
                                       const std::vector<std::string> &items) {
   for (const auto &item_json : items) {
@@ -1670,20 +1750,10 @@ static void BuildTracksForUri(std::vector<TspItem*> *tracks, Tsp *tsp, const std
   } else if (uri_str.rfind("spotify:toplist:track:", 0) == 0) {
     std::string code = uri_str.substr(strlen("spotify:toplist:track:"));
     if (code == "discoverweekly" || code.rfind("discoverweekly:", 0) == 0) {
-      std::string discover_playlist_id;
-      bool has_saved_playlist_id = code.rfind("discoverweekly:", 0) == 0;
-      if (code.rfind("discoverweekly:", 0) == 0)
-        discover_playlist_id = code.substr(strlen("discoverweekly:"));
-      if (!discover_playlist_id.empty())
-        AppendPlaylistTracks(tracks, tsp, discover_playlist_id);
-      if (tracks->empty()) {
-        discover_playlist_id = FindUserPlaylistByName(tsp, "Discover Weekly");
-        if (!discover_playlist_id.empty())
-          AppendPlaylistTracks(tracks, tsp, discover_playlist_id);
-      }
-      if (tracks->empty()) {
-        std::cout << "[DEBUG] Discover Weekly: no API-visible playlist tracks"
-                  << (has_saved_playlist_id ? " for saved playlist" : "") << std::endl;
+      AppendCurrentPlaybackQueue(tracks, tsp);
+      if (code.rfind("discoverweekly:", 0) == 0) {
+        std::string playlist_id = code.substr(strlen("discoverweekly:"));
+        AppendResolvedContextTracks(tracks, tsp, "spotify:playlist:" + playlist_id);
       }
     } else if (const char *top_playlist_id = TopListPlaylistId(code)) {
       AppendPlaylistTracks(tracks, tsp, top_playlist_id);

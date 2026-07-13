@@ -1,9 +1,35 @@
 # Spotiamp
+
+[![Build](https://github.com/yungtry/Spotiamp/actions/workflows/build.yml/badge.svg)](https://github.com/yungtry/Spotiamp/actions/workflows/build.yml)
+
 ![UI](https://raw.githubusercontent.com/kran27/Spotiamp/main/uidemo.png)
+
 Features:
 - New Modern Theme
 - Fixed Album Art Support
 - Improved Theming Support (WIP)
+
+<details>
+<summary>TODO / Roadmap</summary>
+
+Implemented:
+
+- [x] Librespot player backend
+- [x] Modern Spotify API usage
+- [x] Working likes
+- [x] Discover Weekly
+
+To be implemented:
+
+- [ ] Fix Album Art support
+- [ ] Liking songs
+- [ ] Adding songs to playlists
+- [ ] Removing songs from playlists
+- [ ] Creating playlists
+- [ ] Radios
+- [ ] Milkdrop visualizer
+
+</details>
 
 
 # What is it?

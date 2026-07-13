@@ -153,6 +153,9 @@ public:
 
 	std::string username_;
 	std::string curr_skin_;
+	bool waiting_for_discover_playback_ = false;
+	std::string discover_queue_uri_;
+	std::string pending_queue_uri_;
 	std::vector<std::string> pluris_;
 	std::vector<std::string> remote_device_ids_;
 };
