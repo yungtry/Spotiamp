@@ -7,7 +7,7 @@ refresh_token.txt
 librespot_err.log
 .DS_Store
 CMakeUserPresets.json
-playback/librespot_bridge/target/
+src/playback/librespot_bridge/target/
 
 # Generated at build time — never commit
 generated/credentials.h

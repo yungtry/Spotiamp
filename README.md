@@ -115,5 +115,3 @@ The finished Windows program is `build/windows/spotiamp.exe`.
 ### GitHub automatic builds
 
 Add `SPOTIFY_CLIENT_ID` in **Settings → Secrets and variables → Actions → New repository secret**. Open the **Actions** tab and run the **Build** workflow. Download `spotiamp-windows` or `spotiamp-macos` from the finished run.
-
-- Playlist screen uses [Montserrat Medium](https://fonts.google.com/download?family=Montserrat)

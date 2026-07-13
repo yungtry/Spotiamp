@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(spotiamp LANGUAGES C CXX)
+project(spotiamp VERSION 0.0.1 LANGUAGES C CXX)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -118,7 +118,7 @@ if(WIN32)
     enable_language(RC)
     list(APPEND SPOTIAMP_SRCS
         ${SRC_DIR}/windows_resources.rc
-        ${SRC_DIR}/icon.ico
+        ${CMAKE_SOURCE_DIR}/assets/icon.ico
     )
     list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv)
     if(MINGW)
@@ -130,7 +130,7 @@ endif()
 
 add_executable(spotiamp WIN32 ${SPOTIAMP_SRCS})
 
-target_compile_definitions(spotiamp PRIVATE WITH_SDL)
+target_compile_definitions(spotiamp PRIVATE WITH_SDL VERSION_STR="${PROJECT_VERSION}")
 
 if(CARGO_EXECUTABLE AND NOT EXISTS "${CARGO_EXECUTABLE}")
     unset(CARGO_EXECUTABLE CACHE)
@@ -139,7 +139,7 @@ find_program(CARGO_EXECUTABLE cargo)
 if(NOT CARGO_EXECUTABLE)
     message(FATAL_ERROR "Cargo is required to build the Rust playback bridge")
 endif()
-set(RUST_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/playback/librespot_bridge")
+set(RUST_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/src/playback/librespot_bridge")
 set(RUST_BRIDGE_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
 set(SPOTIAMP_RUST_PROFILE "Release" CACHE STRING "Rust playback bridge profile (Debug or Release)")
 set_property(CACHE SPOTIAMP_RUST_PROFILE PROPERTY STRINGS Debug Release)
@@ -226,8 +226,8 @@ endif()
 
 add_custom_command(TARGET spotiamp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Skins"
-            "$<TARGET_FILE_DIR:spotiamp>/Skins"
+            "${CMAKE_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:spotiamp>/assets"
 )
 
 # Linking

@@ -11,7 +11,19 @@
 static INT_PTR CALLBACK InputDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_INITDIALOG) {
     SetWindowLongPtr(hwnd, GWLP_USERDATA, lParam);
-    return TRUE;
+    RECT dialog_rect;
+    RECT work_area;
+    if (GetWindowRect(hwnd, &dialog_rect) &&
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &work_area, 0)) {
+      int width = dialog_rect.right - dialog_rect.left;
+      int height = dialog_rect.bottom - dialog_rect.top;
+      int x = work_area.left + ((work_area.right - work_area.left) - width) / 2;
+      int y = work_area.top + ((work_area.bottom - work_area.top) - height) / 2;
+      SetWindowPos(hwnd, HWND_TOP, x, y, 0, 0,
+                   SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    SetFocus(GetDlgItem(hwnd, 100));
+    return FALSE;
   }
   if (msg == WM_COMMAND) {
     if (LOWORD(wParam) == IDOK) {

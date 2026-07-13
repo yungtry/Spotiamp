@@ -92,6 +92,9 @@ struct Tsp {
   int volume;
   bool shuffle;
   bool repeat;
+  bool remote_playback_active;
+  std::string remote_device_id;
+  std::string remote_device_name;
   
   TspItemList *player_list;
   
@@ -107,7 +110,7 @@ struct Tsp {
           local_position_command_started_ms(0), local_expected_position_ms(-1),
           local_bridge_transition_seen(false), local_desired_playing(false),
           local_stopped(false), is_playing(false), volume(65535),
-          shuffle(false), repeat(false), player_list(NULL),
+          shuffle(false), repeat(false), remote_playback_active(false), player_list(NULL),
           audio_thread_running(false), poll_thread_running(false) {
     player_list = new TspItemList();
   }
@@ -1753,7 +1756,10 @@ static void BuildTracksForUri(std::vector<TspItem*> *tracks, Tsp *tsp, const std
       AppendCurrentPlaybackQueue(tracks, tsp);
       if (code.rfind("discoverweekly:", 0) == 0) {
         std::string playlist_id = code.substr(strlen("discoverweekly:"));
-        AppendResolvedContextTracks(tracks, tsp, "spotify:playlist:" + playlist_id);
+        std::string context_uri = playlist_id == "format"
+            ? "spotify:playlist-format:discover-weekly"
+            : "spotify:playlist:" + playlist_id;
+        AppendResolvedContextTracks(tracks, tsp, context_uri);
       }
     } else if (const char *top_playlist_id = TopListPlaylistId(code)) {
       AppendPlaylistTracks(tracks, tsp, top_playlist_id);
@@ -1804,15 +1810,23 @@ static std::string ExtractSpotifyUri(const std::string &json, const std::string 
 }
 
 // Playback bridge control
-static void SpawnLibrespot(const char *token) {
+static bool SpawnLibrespot(const char *token) {
   char err_buf[1024] = {0};
-  int rc = sp_playback_bridge_start(token, NULL, err_buf, sizeof(err_buf));
-  if (rc != 0) {
-    std::cout << "[DEBUG] Rust playback bridge start failed (" << rc << "): " << err_buf << std::endl;
-#if defined(_WIN32)
-    MessageBoxA(NULL, err_buf, "Spotiamp Playback Bridge Error", MB_ICONERROR | MB_OK);
-#endif
+  int rc = -1;
+  for (int attempt = 1; attempt <= 3; ++attempt) {
+    err_buf[0] = 0;
+    rc = sp_playback_bridge_start(token, NULL, err_buf, sizeof(err_buf));
+    if (rc == 0)
+      return true;
+    std::cout << "[DEBUG] Rust playback bridge start attempt " << attempt
+              << " failed (" << rc << "): " << err_buf << std::endl;
+    if (attempt < 3)
+      SleepForMicroseconds(750000);
   }
+#if defined(_WIN32)
+  MessageBoxA(NULL, err_buf, "Spotiamp Playback Bridge Error", MB_ICONERROR | MB_OK);
+#endif
+  return false;
 }
 
 static void KillLibrespot() {
@@ -1944,6 +1958,26 @@ static void PollThreadProc(Tsp *tsp) {
     }
     
     std::string response = HttpGet("https://api.spotify.com/v1/me/player", access_token);
+    if (!response.empty()) {
+      std::string device_json = JsonExtractObjectShallow(response, "device");
+      std::string device_id = JsonExtractStringShallow(device_json, "id");
+      std::string device_name = JsonExtractStringShallow(device_json, "name");
+      bool response_is_playing = JsonExtractBoolShallow(response, "is_playing", false);
+      bool is_local_device = device_id == "spotiamp" || device_name == "Spotiamp";
+      bool remote_playback = response_is_playing && !device_name.empty() && !is_local_device;
+      bool remote_state_changed = false;
+      {
+        std::lock_guard<std::mutex> lock(tsp->mutex);
+        remote_state_changed = tsp->remote_playback_active != remote_playback;
+        tsp->remote_playback_active = remote_playback;
+        tsp->remote_device_id = remote_playback ? device_id : "";
+        tsp->remote_device_name = remote_playback ? device_name : "";
+      }
+      if (remote_state_changed)
+        DispatchPlayerCallback(tsp, kTspCallbackEvent_RemoteDeviceChanged);
+      if (remote_playback)
+        response.clear();
+    }
     if (!response.empty()) {
       bool is_p = (JsonExtractString(response, "is_playing") == "true" || JsonExtractInt(response, "is_playing") == 1);
       bool has_numeric_progress = JsonHasNumericValue(response, "progress_ms");
@@ -2121,7 +2155,9 @@ TSP_PUBLIC TspBool TspEnableAudioThreading(Tsp *tsp, TspMutex *mutex) {
 }
 
 TSP_PUBLIC int TspGetActiveRemoteDevice(Tsp *tsp) {
-  return -1;
+  if (!tsp) return -1;
+  std::lock_guard<std::mutex> lock(tsp->mutex);
+  return tsp->remote_playback_active ? 0 : -1;
 }
 
 TSP_PUBLIC TspError TspGetConnectionError(Tsp *tsp) {
@@ -2157,11 +2193,21 @@ TSP_PUBLIC const char * TspGetRadioUri(Tsp *tsp, const char *uri) {
 }
 
 TSP_PUBLIC const char * TspGetRemoteDeviceId(Tsp *tsp, int index) {
-  return NULL;
+  if (!tsp || index != 0) return NULL;
+  static thread_local std::string value;
+  std::lock_guard<std::mutex> lock(tsp->mutex);
+  if (!tsp->remote_playback_active) return NULL;
+  value = tsp->remote_device_id;
+  return value.c_str();
 }
 
 TSP_PUBLIC const char * TspGetRemoteDeviceName(Tsp *tsp, int index) {
-  return NULL;
+  if (!tsp || index != 0) return NULL;
+  static thread_local std::string value;
+  std::lock_guard<std::mutex> lock(tsp->mutex);
+  if (!tsp->remote_playback_active) return NULL;
+  value = tsp->remote_device_name;
+  return value.c_str();
 }
 
 TSP_PUBLIC int TspGetRootlistCount(Tsp *tsp) {
@@ -2495,12 +2541,28 @@ TSP_PUBLIC TspError TspLogin(Tsp *tsp, const char *, const char *, int) {
     }
     
     PrefWriteStr(refresh_token.c_str(), "spotify.refresh_token");
+
+    // A token obtained through the refresh grant is accepted by the Connect
+    // session immediately on every platform. This also makes first login use
+    // the exact same path as subsequent application starts.
+    std::string refreshed_response = RefreshAccessToken(refresh_token, GetSpotifyClientId());
+    std::string refreshed_access = JsonExtractString(refreshed_response, "access_token");
+    std::string rotated_refresh = JsonExtractString(refreshed_response, "refresh_token");
+    if (!refreshed_access.empty())
+      access_token = refreshed_access;
+    if (!rotated_refresh.empty()) {
+      refresh_token = rotated_refresh;
+      PrefWriteStr(refresh_token.c_str(), "spotify.refresh_token");
+    }
   }
   
   tsp->access_token = access_token;
   
   // Spawn librespot Connect player daemon using access token
-  SpawnLibrespot(access_token.c_str());
+  if (!SpawnLibrespot(access_token.c_str())) {
+    tsp->connection_error = kTspErrorBadCredentials;
+    return kTspErrorBadCredentials;
+  }
   
   tsp->connected = true;
   tsp->connection_error = kTspErrorOk;

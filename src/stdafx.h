@@ -25,7 +25,5 @@
 #endif
 #endif
 
-#define VERSION_STR "0.2.1"
-
 #pragma warning(disable: 4530)
 // TODO: reference additional headers your program requires here

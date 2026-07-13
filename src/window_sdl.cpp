@@ -8,7 +8,9 @@
 #include "SDL_clipboard.h"
 #include "SDL_video.h"
 #include <algorithm>
+#include <iostream>
 #include <sys/stat.h>
+#include <unordered_map>
 #include "zipfile.h"
 #if defined(_WIN32)
 #include <windows.h>
@@ -20,6 +22,7 @@
 #endif
 
 static ZipFile *current_skin_zip = NULL;
+static ZipFile *base_skin_fallback_zip = NULL;
 static std::string current_skin_basedir;
 static SDL_Surface *g_pledit_text_surface = NULL;
 
@@ -101,10 +104,24 @@ PlatformWindow::PlatformWindow() {
 PlatformWindow::~PlatformWindow() {
 }
 
+int PlatformWindow::BackingScale() const {
+  if (!window_ || !surface_)
+    return 1;
+  int window_width = 0;
+  int window_height = 0;
+  SDL_GetWindowSize(window_, &window_width, &window_height);
+  if (window_width <= 0 || window_height <= 0)
+    return 1;
+  int scale_x = surface_->w / window_width;
+  int scale_y = surface_->h / window_height;
+  return scale_x > 1 && scale_x == scale_y ? scale_x : 1;
+}
+
 void PlatformWindow::Create(PlatformWindow *owner_window) {
   PlatformWindowBase::Create(owner_window);
   window_ = SDL_CreateWindow("SpotifyAmp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                             width_, height_, SDL_WINDOW_BORDERLESS | (visible_ ? 0 : SDL_WINDOW_HIDDEN));
+                             width_, height_, SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALLOW_HIGHDPI |
+                             (visible_ ? 0 : SDL_WINDOW_HIDDEN));
   window_id_ = SDL_GetWindowID(window_);
   surface_ = SDL_GetWindowSurface(window_);
   int x = 0, y = 0, w = 0, h = 0;
@@ -121,10 +138,10 @@ void PlatformWindow::Blit(int dx, int dy, int w, int h, Bitmap *src, int sx, int
   SDL_Surface *srcb = (SDL_Surface*)src;
   SDL_Rect srcrect = {sx, sy, w, h};
   
-  int d = double_size() ? 2 : 1;
+  int d = (double_size() ? 2 : 1) * BackingScale();
   SDL_Rect dstrect = {dx * d, dy * d, w * d, h * d};
   
-  if (d == 2) {
+  if (d != 1) {
     SDL_BlitScaled(srcb, &srcrect, surface_, &dstrect);
   } else {
     SDL_BlitSurface(srcb, &srcrect, surface_, &dstrect);
@@ -136,7 +153,7 @@ void PlatformWindow::StretchBlit(int dx, int dy, int w, int h, Bitmap *src, int 
   SDL_Surface *srcb = (SDL_Surface*)src;
   SDL_Rect srcrect = {sx, sy, sw, sh};
   
-  int d = double_size() ? 2 : 1;
+  int d = (double_size() ? 2 : 1) * BackingScale();
   SDL_Rect dstrect = {dx * d, dy * d, w * d, h * d};
   
   SDL_BlitScaled(srcb, &srcrect, surface_, &dstrect);
@@ -144,7 +161,7 @@ void PlatformWindow::StretchBlit(int dx, int dy, int w, int h, Bitmap *src, int 
 
 void PlatformWindow::Fill(int x, int y, int w, int h, unsigned int color) {
   if (!surface_) return;
-  int d = double_size() ? 2 : 1;
+  int d = (double_size() ? 2 : 1) * BackingScale();
   SDL_Rect rect = {x * d, y * d, w * d, h * d};
   
   uint8_t r = (color >> 16) & 0xFF;
@@ -437,7 +454,7 @@ void PlatformWindow::Line(int x, int y, int x2, int y2, unsigned int color) {
 
 void PlatformWindow::SetPixel(int x, int y, unsigned int color) {
   if (!surface_) return;
-  int d = double_size() ? 2 : 1;
+  int d = (double_size() ? 2 : 1) * BackingScale();
   uint8_t r = (color >> 16) & 0xFF;
   uint8_t g = (color >> 8) & 0xFF;
   uint8_t b = color & 0xFF;
@@ -490,10 +507,7 @@ void ProcessMainThreadTasks() {
 }
 
 int main(int argc, char *argv[]) {
-  // Disable HiDPI on macOS so the window surface is at logical pixel size
-  // and macOS scales it up using nearest-neighbor. Without this, macOS uses
-  // bilinear interpolation on the 1x surface, making the pixel art blurry.
-  SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "1");
+  SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "0");
   SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
   if (char *base_path = SDL_GetBasePath()) {
     snprintf(exepath, MAX_PATH, "%s", base_path);
@@ -612,16 +626,9 @@ bool PlatformLoadBitmap(Bitmap **bitmap, const char *name) {
       }
     }
   }
-  if (!*bitmap) {
-    std::string path = std::string("skin/") + name;
-    *bitmap = (Bitmap*)SDL_LoadBMP(path.c_str());
-    if (*bitmap) {
-      SDL_Surface *converted = SDL_ConvertSurfaceFormat((SDL_Surface*)*bitmap, SDL_PIXELFORMAT_ARGB8888, 0);
-      if (converted) {
-        SDL_FreeSurface((SDL_Surface*)*bitmap);
-        *bitmap = (Bitmap*)converted;
-      }
-    }
+  if (!*bitmap && base_skin_fallback_zip &&
+      ZipFileReader::ReadFileToString(base_skin_fallback_zip, name, &zipdata)) {
+    *bitmap = PlatformLoadBitmapFromBuf(zipdata.data(), zipdata.size());
   }
   if (*bitmap && strcmp(name, "text.bmp") == 0) {
     PlatformPostProcessTextBitmap(*bitmap);
@@ -651,7 +658,99 @@ bool PlatformLoadString(const char *name, std::string *result) {
   return false;
 }
 
-void PlatformSetSkin(const char *filename) {
+static unsigned int GetSurfaceRgb(SDL_Surface *surface, int x, int y) {
+  int bpp = surface->format->BytesPerPixel;
+  Uint8 *p = (Uint8*)surface->pixels + y * surface->pitch + x * bpp;
+  Uint32 pixel = 0;
+  switch (bpp) {
+  case 1:
+    pixel = *p;
+    break;
+  case 2:
+    pixel = *(Uint16*)p;
+    break;
+  case 3:
+    if (SDL_BYTEORDER == SDL_BIG_ENDIAN)
+      pixel = p[0] << 16 | p[1] << 8 | p[2];
+    else
+      pixel = p[0] | p[1] << 8 | p[2] << 16;
+    break;
+  case 4:
+    pixel = *(Uint32*)p;
+    break;
+  default:
+    return 0;
+  }
+  Uint8 r = 0, g = 0, b = 0;
+  SDL_GetRGB(pixel, surface->format, &r, &g, &b);
+  return ((unsigned int)r << 16) | ((unsigned int)g << 8) | b;
+}
+
+static int ColorDistance(unsigned int a, unsigned int b) {
+  return abs((int)((a >> 16) & 0xff) - (int)((b >> 16) & 0xff)) +
+         abs((int)((a >> 8) & 0xff) - (int)((b >> 8) & 0xff)) +
+         abs((int)(a & 0xff) - (int)(b & 0xff));
+}
+
+bool PlatformDeriveTextColors(Bitmap *bitmap, unsigned int *text_color, unsigned int *background_color) {
+  SDL_Surface *surface = (SDL_Surface*)bitmap;
+  if (!surface || surface->w <= 0 || surface->h <= 0)
+    return false;
+
+  bool locked = false;
+  if (SDL_MUSTLOCK(surface)) {
+    if (SDL_LockSurface(surface) != 0)
+      return false;
+    locked = true;
+  }
+
+  int bg_x = surface->w > 150 ? 150 : surface->w - 1;
+  unsigned int bg = GetSurfaceRgb(surface, bg_x, 0);
+  std::unordered_map<unsigned int, int> counts;
+
+  int max_y = IntMin(6, surface->h);
+  int max_x = IntMin(150, surface->w);
+  for (int y = 0; y < max_y; ++y) {
+    for (int x = 0; x < max_x; ++x) {
+      unsigned int color = GetSurfaceRgb(surface, x, y);
+      if (ColorDistance(color, bg) <= 24)
+        continue;
+
+      int r = (color >> 16) & 0xff;
+      int g = (color >> 8) & 0xff;
+      int b = color & 0xff;
+      int maxc = IntMax(r, IntMax(g, b));
+      if (maxc < 80)
+        continue;
+
+      counts[color]++;
+    }
+  }
+
+  unsigned int best_color = 0;
+  int best_score = 0;
+  for (const auto &it : counts) {
+    unsigned int color = it.first;
+    if (it.second > best_score) {
+      best_score = it.second;
+      best_color = color;
+    }
+  }
+
+  if (locked)
+    SDL_UnlockSurface(surface);
+
+  if (!best_score)
+    return false;
+
+  if (text_color)
+    *text_color = best_color;
+  if (background_color)
+    *background_color = bg;
+  return true;
+}
+
+bool PlatformSetSkin(const char *filename) {
   if (g_pledit_text_surface) {
     SDL_FreeSurface(g_pledit_text_surface);
     g_pledit_text_surface = NULL;
@@ -659,6 +758,10 @@ void PlatformSetSkin(const char *filename) {
   if (current_skin_zip) {
     ZipFileReader::Free(current_skin_zip);
     current_skin_zip = NULL;
+  }
+  if (base_skin_fallback_zip) {
+    ZipFileReader::Free(base_skin_fallback_zip);
+    base_skin_fallback_zip = NULL;
   }
   current_skin_basedir.clear();
   
@@ -680,6 +783,18 @@ void PlatformSetSkin(const char *filename) {
       }
     }
   }
+  if ((current_skin_zip || !current_skin_basedir.empty()) && filename) {
+    std::string selected(filename);
+    const std::string base_name = "base-2.91.wsz";
+    if (selected.size() < base_name.size() ||
+        selected.compare(selected.size() - base_name.size(), base_name.size(), base_name) != 0) {
+      size_t slash = selected.find_last_of("/\\");
+      std::string base_path = (slash == std::string::npos ? "" : selected.substr(0, slash + 1)) + base_name;
+      FileIO *base_io = new SimpleFileIO(base_path.c_str());
+      base_skin_fallback_zip = ZipFileReader::Open(base_io, true);
+    }
+  }
+  return current_skin_zip != NULL || !current_skin_basedir.empty();
 }
 
 char *for_each_line(char **ptr) {
@@ -1060,21 +1175,32 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
   if (!surface)
     return;
 
-  Uint32 bg = SDL_MapRGB(surface->format, 0xee, 0xee, 0xe8);
-  Uint32 border = SDL_MapRGB(surface->format, 0x21, 0x21, 0x21);
-  Uint32 sep = SDL_MapRGB(surface->format, 0x9c, 0x9c, 0x94);
-  Uint32 header = SDL_MapRGB(surface->format, 0xd7, 0xd7, 0xcf);
-  Uint32 hover_bg = SDL_MapRGB(surface->format, 0x24, 0x63, 0xa8);
+  SDL_Surface *logical_surface = surface;
+  int window_width = 0;
+  int window_height = 0;
+  SDL_GetWindowSize(popup, &window_width, &window_height);
+  if (surface->w != window_width || surface->h != window_height) {
+    logical_surface = SDL_CreateRGBSurfaceWithFormat(
+        0, window_width, window_height, 32, surface->format->format);
+    if (!logical_surface)
+      logical_surface = surface;
+  }
 
-  SDL_FillRect(surface, NULL, bg);
+  Uint32 bg = SDL_MapRGB(logical_surface->format, 0xee, 0xee, 0xe8);
+  Uint32 border = SDL_MapRGB(logical_surface->format, 0x21, 0x21, 0x21);
+  Uint32 sep = SDL_MapRGB(logical_surface->format, 0x9c, 0x9c, 0x94);
+  Uint32 header = SDL_MapRGB(logical_surface->format, 0xd7, 0xd7, 0xcf);
+  Uint32 hover_bg = SDL_MapRGB(logical_surface->format, 0x24, 0x63, 0xa8);
+
+  SDL_FillRect(logical_surface, NULL, bg);
   SDL_Rect top = {0, 0, width, 1};
   SDL_Rect left = {0, 0, 1, visible_rows * row_h + 2};
   SDL_Rect right = {width - 1, 0, 1, visible_rows * row_h + 2};
   SDL_Rect bottom = {0, visible_rows * row_h + 1, width, 1};
-  SDL_FillRect(surface, &top, border);
-  SDL_FillRect(surface, &left, border);
-  SDL_FillRect(surface, &right, border);
-  SDL_FillRect(surface, &bottom, border);
+  SDL_FillRect(logical_surface, &top, border);
+  SDL_FillRect(logical_surface, &left, border);
+  SDL_FillRect(logical_surface, &right, border);
+  SDL_FillRect(logical_surface, &bottom, border);
 
   for (int row = 0; row < visible_rows; ++row) {
     int item_index = scroll + row;
@@ -1085,7 +1211,7 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
     int y = 1 + row * row_h;
     if (item.flags & kMenuSeparator) {
       SDL_Rect line = {8, y + row_h / 2, width - 16, 1};
-      SDL_FillRect(surface, &line, sep);
+      SDL_FillRect(logical_surface, &line, sep);
       continue;
     }
 
@@ -1093,10 +1219,10 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
     bool selected = item_index == hover && selectable;
     if (selected) {
       SDL_Rect rect = {2, y + 1, width - 4, row_h - 2};
-      SDL_FillRect(surface, &rect, hover_bg);
+      SDL_FillRect(logical_surface, &rect, hover_bg);
     } else if (item.flags & MenuBuilder::kGrayed) {
       SDL_Rect rect = {2, y + 1, width - 4, row_h - 2};
-      SDL_FillRect(surface, &rect, header);
+      SDL_FillRect(logical_surface, &rect, header);
     }
 
     std::string title = MenuDisplayTitle(item);
@@ -1104,9 +1230,14 @@ static void PaintPopupMenu(SDL_Window *popup, int width, int row_h, int visible_
     int text_y = y + (row_h - 6) / 2;
     Uint8 c = selectable ? 0x00 : 0x66;
     if (selected)
-      DrawMenuText(surface, text_x, text_y, title, 0xff, 0xff, 0xff);
+      DrawMenuText(logical_surface, text_x, text_y, title, 0xff, 0xff, 0xff);
     else
-      DrawMenuText(surface, text_x, text_y, title, c, c, c);
+      DrawMenuText(logical_surface, text_x, text_y, title, c, c, c);
+  }
+
+  if (logical_surface != surface) {
+    SDL_BlitScaled(logical_surface, NULL, surface, NULL);
+    SDL_FreeSurface(logical_surface);
   }
 
   SDL_UpdateWindowSurface(popup);
@@ -1160,7 +1291,8 @@ int MenuBuilder::PopupAt(PlatformWindow *window, int x, int y) {
 
   SDL_Window *popup = SDL_CreateWindow("Spotiamp Menu", screen_x, screen_y,
                                        popup_w, popup_h,
-                                       SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP);
+                                       SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP |
+                                       SDL_WINDOW_ALLOW_HIGHDPI);
   if (!popup)
     return 0;
 
@@ -1312,7 +1444,8 @@ static bool OpenActiveMenu(PlatformWindow *window, int x, int y, std::function<v
 
   g_active_menu_popup = SDL_CreateWindow("Spotiamp Menu", screen_x, screen_y,
                                          g_active_menu_width, popup_h,
-                                         SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP);
+                                         SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALWAYS_ON_TOP |
+                                         SDL_WINDOW_ALLOW_HIGHDPI);
   if (!g_active_menu_popup)
     return false;
 

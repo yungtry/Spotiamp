@@ -116,6 +116,7 @@ public:
 
 	bool in_dialog_;
 	bool login_in_progress_;
+	bool search_in_progress_;
 	bool global_hotkeys_;
 	bool itemlist_in_sync_with_player_;
 

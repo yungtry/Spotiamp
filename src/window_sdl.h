@@ -82,6 +82,7 @@ public:
   static bool g_easy_move;
 
 private:  
+  int BackingScale() const;
   void AlwaysOnTopChanged();
   void VisibleChanged();
 

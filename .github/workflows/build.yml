@@ -54,7 +54,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-downloads-${{ hashFiles('playback/librespot_bridge/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-downloads-${{ hashFiles('src/playback/librespot_bridge/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-downloads-
 
@@ -62,7 +62,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/app/cargo
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-build-${{ hashFiles('playback/librespot_bridge/Cargo.lock', 'playback/librespot_bridge/Cargo.toml', 'playback/librespot_bridge/src/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-build-${{ hashFiles('src/playback/librespot_bridge/Cargo.lock', 'src/playback/librespot_bridge/Cargo.toml', 'src/playback/librespot_bridge/src/**') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-build-
 
@@ -95,7 +95,7 @@ jobs:
         run: |
           cmake -E make_directory dist/Spotiamp
           cmake -E copy "${{ matrix.binary }}" "dist/Spotiamp/${{ matrix.executable }}"
-          cmake -E copy_directory Skins dist/Spotiamp/Skins
+          cmake -E copy_directory assets dist/Spotiamp/assets
           cmake -E copy LICENSE dist/Spotiamp/LICENSE
 
       - name: Upload artifact

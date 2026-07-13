@@ -100,6 +100,7 @@ static const char * const toplistnames[][2] = {
 };
 
 static const char kDiscoverWeeklyPseudoUri[] = "spotify:toplist:track:discoverweekly";
+static const char kDiscoverWeeklyContextUri[] = "spotify:playlist-format:discover-weekly";
 static const char kDiscoverWeeklyPref[] = "discover_weekly_uri";
 
 static std::string NormalizeSpotifyPlaylistUri(const std::string &input) {
@@ -121,7 +122,7 @@ static std::string NormalizeSpotifyPlaylistUri(const std::string &input) {
   return end > start ? std::string(uri_prefix) + input.substr(start, end - start) : "";
 }
 
-static std::string ResolveDiscoverWeeklyUri(Tsp *tsp, PlatformWindow *parent) {
+static std::string ResolveDiscoverWeeklyUri(Tsp *tsp) {
   std::string saved = NormalizeSpotifyPlaylistUri(PrefReadStr("", kDiscoverWeeklyPref));
   if (!saved.empty())
     return saved;
@@ -136,13 +137,7 @@ static std::string ResolveDiscoverWeeklyUri(Tsp *tsp, PlatformWindow *parent) {
     }
   }
 
-  std::string input = ShowTextInputDialog(
-      parent, "Discover Weekly",
-      "Paste the Discover Weekly playlist link from Spotify. Spotiamp only needs this once.", "");
-  saved = NormalizeSpotifyPlaylistUri(input);
-  if (!saved.empty())
-    PrefWriteStr(saved.c_str(), kDiscoverWeeklyPref);
-  return saved;
+  return kDiscoverWeeklyContextUri;
 }
 
 int MyWavPush(void *context, int flags,
@@ -176,7 +171,7 @@ static void Skin_Index() {
   }
   char file[MAX_PATH + 100];
   int num_skins = 0;
-  sprintf(file, "%sSkins", exepath);
+  sprintf(file, "%sassets/skins", exepath);
   FileEnumerator enumerator(file);
   while (num_skins < 100 && enumerator.Next()) {
     if (!enumerator.is_directory() && strcmp(enumerator.filename(), kBaseSkinFile) == 0)
@@ -262,6 +257,7 @@ MainWindow::MainWindow() {
   stereo_ = true;
   in_dialog_ = false;
   login_in_progress_ = false;
+  search_in_progress_ = false;
   connect_error_ = false;
   global_hotkeys_ = false;
   coverart_visible_ = false;
@@ -308,11 +304,18 @@ static void LoadSkin(const char *skinfile) {
   const char *effective_skin = (skinfile && skinfile[0]) ? skinfile : kBaseSkinFile;
   if (effective_skin && effective_skin[0]) {
 #if defined(WITH_SDL)
-    snprintf(file, sizeof(file), "%sSkins/%s", exepath, effective_skin);
+    snprintf(file, sizeof(file), "%sassets/skins/%s", exepath, effective_skin);
 #else
-    sprintf(file, "%sSkins\\%s", exepath, effective_skin);
+    sprintf(file, "%sassets\\skins\\%s", exepath, effective_skin);
 #endif
-    PlatformSetSkin(file);
+    if (!PlatformSetSkin(file) && strcmp(effective_skin, kBaseSkinFile) != 0) {
+#if defined(WITH_SDL)
+      snprintf(file, sizeof(file), "%sassets/skins/%s", exepath, kBaseSkinFile);
+#else
+      sprintf(file, "%sassets\\skins\\%s", exepath, kBaseSkinFile);
+#endif
+      PlatformSetSkin(file);
+    }
   } else {
     PlatformSetSkin(NULL);
   }
@@ -348,9 +351,11 @@ static void LoadSkin(const char *skinfile) {
   g_color_current = 0xffffff;
   g_color_bg_normal = 0x181818;
   g_color_bg_selected = 0x323232;
-  g_playlist_font = "Montserrat Medium";
+  g_playlist_font.clear();
 
+  bool has_playlist_colors = false;
   if (PlatformLoadString("pledit.txt", &vis_str)) {
+    has_playlist_colors = true;
     char *lines = &vis_str[0];
     while (char *s = for_each_line(&lines)) {
       if (char *t = strbegins(s, "Normal=")) {
@@ -364,6 +369,15 @@ static void LoadSkin(const char *skinfile) {
       } else if (char *t = strbegins(s, "Font=")) {
         g_playlist_font = t;
       }
+    }
+  }
+
+  if (!has_playlist_colors) {
+    unsigned int text = 0;
+    unsigned int background = 0;
+    if (PlatformDeriveTextColors(res.text, &text, &background)) {
+      g_color_normal = text;
+      g_color_bg_normal = background;
     }
   }
 
@@ -1363,14 +1377,17 @@ void MainWindow::OpenUri(const char *query, int track_to_play) {
   if (!query || !query[0])
     return;
   if (strcmp(query, kDiscoverWeeklyPseudoUri) == 0) {
-    std::string discover_uri = ResolveDiscoverWeeklyUri(tsp_, this);
+    std::string discover_uri = ResolveDiscoverWeeklyUri(tsp_);
     if (discover_uri.empty())
       return;
     std::cout << "[DEBUG] Discover Weekly: starting context " << discover_uri << std::endl;
     itemlist_in_sync_with_player_ = false;
     pending_queue_uri_.clear();
-    discover_queue_uri_ = std::string(kDiscoverWeeklyPseudoUri) + ":" +
-                          discover_uri.substr(strlen("spotify:playlist:"));
+    discover_queue_uri_ = std::string(kDiscoverWeeklyPseudoUri) + ":";
+    if (discover_uri.rfind("spotify:playlist:", 0) == 0)
+      discover_queue_uri_ += discover_uri.substr(strlen("spotify:playlist:"));
+    else
+      discover_queue_uri_ += "format";
     waiting_for_discover_playback_ = true;
     TspPlayerPlayContext(tsp_, discover_uri.c_str(), NULL, 0);
     return;
@@ -1565,12 +1582,29 @@ void MainWindow::ShowVisualizeMenu() {
 }
 
 void MainWindow::ShowSearchDialog() {
+#if defined(_WIN32)
+  if (search_in_progress_)
+    return;
+  search_in_progress_ = true;
+  std::thread([this]() {
+    std::string query = ::ShowSearchDialog(this, tsp_);
+    RunOnMainThread([this, query]() {
+      search_in_progress_ = false;
+      if (!query.empty()) {
+        SetPlaylistVisible(true);
+        playlist_window_->MakeActive();
+        OpenUri(TspGetSearchUri(tsp_, query.c_str()), -2);
+      }
+    });
+  }).detach();
+#else
   std::string query = ::ShowSearchDialog(this, tsp_);
   if (query.size()) {
     SetPlaylistVisible(true);
     playlist_window_->MakeActive();
     OpenUri(TspGetSearchUri(tsp_, query.c_str()), -2);
   }
+#endif
 }
 
 void MainWindow::StartLogin() {
@@ -1917,13 +1951,13 @@ void PlaylistWindow::PaintFull() {
     case kTspItemType_OpenFolder: {
       int indent = TspItemListGetIndent(item_list, j) * 8;
       sprintf(buffer, "%s [%s]", item_type == kTspItemType_OpenFolder ? "\xE2\x96\xBC" : "\xE2\x96\xBA", TspItemGetName(item));
-      DrawText(16 + indent, y, width() - 12 - 19 - 35 - 4 - indent, row_height_, buffer, 0, 0x00ff00);
+      DrawText(16 + indent, y, width() - 12 - 19 - 35 - 4 - indent, row_height_, buffer, 0, text_color);
       } break;
 
     case kTspItemType_Playlist: {
       int indent = TspItemListGetIndent(item_list, j) * 8;
-      DrawText(16 + indent, y, width() - 12 - 19 - 70 - 4 - indent, row_height_, TspItemGetName(item), 0, 0x00ff00);
-      DrawText(width() - 19 - 70 - 2, y, 67, row_height_, TspItemGetArtistName(item), 1, 0x00ff00);
+      DrawText(16 + indent, y, width() - 12 - 19 - 70 - 4 - indent, row_height_, TspItemGetName(item), 0, text_color);
+      DrawText(width() - 19 - 70 - 2, y, 67, row_height_, TspItemGetArtistName(item), 1, text_color);
       } break;
     }
   }
@@ -2848,6 +2882,15 @@ static void MyCallback(void *context, TspCallbackEvent event, void *source, void
       PrefWriteInt(TspPlayerGetShuffle(w->tsp()), "shuffle");
       PrefWriteInt(TspPlayerGetRepeat(w->tsp()), "repeat");
       w->Repaint();
+    } else if (event == kTspCallbackEvent_RemoteDeviceChanged) {
+      if (TspGetActiveRemoteDevice(w->tsp_) >= 0) {
+        const char *device_name = TspGetRemoteDeviceName(w->tsp_, 0);
+        std::string message = "Spotify is currently playing on another device";
+        if (device_name && device_name[0])
+          message += std::string(" (") + device_name + ")";
+        message += ".\r\n\r\nTransfer playback to Spotiamp before using its controls.";
+        MsgBox(message.c_str(), "Spotiamp", MB_ICONEXCLAMATION);
+      }
     } else if (event == kTspCallbackEvent_VolumeChanged) {
       WavSetVolume(TspPlayerGetVolume(w->tsp()));
       w->Repaint();

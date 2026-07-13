@@ -102,7 +102,8 @@ void PrefWriteStr(const char *v, const char *name, ...);
 
 bool PlatformLoadBitmap(Bitmap **bitmap, const char *name);
 bool PlatformLoadString(const char *name, std::string *result);
-void PlatformSetSkin(const char *filename);
+bool PlatformSetSkin(const char *filename);
+bool PlatformDeriveTextColors(Bitmap *bitmap, unsigned int *text_color, unsigned int *background_color);
 Bitmap *PlatformLoadBitmapFromBuf(const void *data, size_t data_size);
 void PlatformDeleteBitmap(Bitmap *bitmap);
 Size PlatformGetBitmapSize(Bitmap *bitmap);
