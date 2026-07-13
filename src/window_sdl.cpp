@@ -40,6 +40,7 @@ public:
 };
 
 static bool g_quit;
+extern char exepath[MAX_PATH];
 static Point g_drag_start;
 static Point g_drag_start_global;
 static Point g_pending_drag_start;
@@ -494,6 +495,10 @@ int main(int argc, char *argv[]) {
   // bilinear interpolation on the 1x surface, making the pixel art blurry.
   SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "1");
   SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+  if (char *base_path = SDL_GetBasePath()) {
+    snprintf(exepath, MAX_PATH, "%s", base_path);
+    SDL_free(base_path);
+  }
   PrefInit();
   InitSpotamp(argc, argv);
   
