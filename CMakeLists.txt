@@ -121,7 +121,7 @@ if(WIN32)
         ${SRC_DIR}/windows_resources.rc
         ${SPOTIAMP_ICON_ICO}
     )
-    list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv)
+    list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv windowscodecs ole32)
     if(MINGW)
         # MinGW's startup library must precede SDL2main so its WinMain
         # reference is resolved from SDL's entry-point shim.
@@ -224,11 +224,15 @@ if(APPLE)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(SYSTEMCONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
     find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+    find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
     target_link_libraries(spotiamp PRIVATE
         ${SECURITY_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
         ${SYSTEMCONFIGURATION_FRAMEWORK}
         ${IOKIT_FRAMEWORK}
+        ${COREGRAPHICS_FRAMEWORK}
+        ${IMAGEIO_FRAMEWORK}
     )
 endif()
 

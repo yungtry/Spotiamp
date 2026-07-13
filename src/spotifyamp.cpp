@@ -2772,14 +2772,62 @@ CoverArtWindow::~CoverArtWindow() {
 }
 
 void CoverArtWindow::Paint() {
-  Load();
+  const uint32 border = g_color_bg_selected ? g_color_bg_selected : 0x323232;
+  const uint32 background = g_color_bg_normal ? g_color_bg_normal : 0x181818;
+  uint32 text = g_color_current ? g_color_current : g_color_normal;
+  if (!text)
+    text = 0xbababa;
 
-  GenWindow::Paint();
+  Fill(0, 0, width(), height(), border);
+  if (res.pledit && width() >= 75) {
+    Blit(0, 0, 25, 14, res.pledit, 72, 42);
+    StretchBlit(25, 0, width() - 75, 14, res.pledit, 72, 57, 25, 14);
+    Blit(width() - 50, 0, 50, 14, res.pledit, 99, active() ? 42 : 57);
+    if (CloseButtonHot())
+      Blit(width() - 11, 3, 9, 9, res.pledit, 52, 42);
+  } else {
+    Fill(1, 1, width() - 2, 13, background);
+    Fill(width() - 11, 3, 9, 9, border);
+    SetPixel(width() - 9, 5, text);
+    SetPixel(width() - 8, 6, text);
+    SetPixel(width() - 7, 7, text);
+    SetPixel(width() - 6, 8, text);
+    SetPixel(width() - 6, 5, text);
+    SetPixel(width() - 7, 6, text);
+    SetPixel(width() - 8, 7, text);
+    SetPixel(width() - 9, 8, text);
+  }
+
+  char title[64];
+  GetWindowText(title, sizeof(title));
+  DrawText(5, 4, width() - 21, 6, title, kEllipsis, text);
+
+  const int content_x = 2;
+  const int content_y = 15;
+  const int content_w = width() - 4;
+  const int content_h = height() - 17;
+  Fill(content_x, content_y, content_w, content_h, background);
+
+  SetPixel(width() - 4, height() - 4, text);
+  SetPixel(width() - 3, height() - 3, text);
+  SetPixel(width() - 4, height() - 2, text);
+  SetPixel(width() - 2, height() - 4, text);
+
   if (bitmap_) {
     Size size = PlatformGetBitmapSize(bitmap_);
-    StretchBlit(11, 20, width() - 19, height() - 34, bitmap_, 0, 0, size.w, size.h);
-  } else {
-    Fill(11, 20, width() - 19, height() - 34, 0);  
+    if (size.w > 0 && size.h > 0 && content_w > 0 && content_h > 0) {
+      int draw_w = content_w;
+      int draw_h = (int)((int64)content_w * size.h / size.w);
+      if (draw_h > content_h) {
+        draw_h = content_h;
+        draw_w = (int)((int64)content_h * size.w / size.h);
+      }
+      draw_w = IntMax(1, draw_w);
+      draw_h = IntMax(1, draw_h);
+      const int draw_x = content_x + (content_w - draw_w) / 2;
+      const int draw_y = content_y + (content_h - draw_h) / 2;
+      StretchBlit(draw_x, draw_y, draw_w, draw_h, bitmap_, 0, 0, size.w, size.h);
+    }
   }
 }
 
@@ -2815,8 +2863,13 @@ void DownloadFile(const char* url, std::vector<char>& buffer) {
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
 
   CURLcode result = curl_easy_perform(curl);
+  long status = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
   if (result != CURLE_OK) {
-    std::cout << "Failed to download file: " << curl_easy_strerror(result) << std::endl;
+    std::cout << "[DEBUG] Cover Art: download failed: " << curl_easy_strerror(result) << std::endl;
+    buffer.clear();
+  } else if (status < 200 || status >= 300) {
+    std::cout << "[DEBUG] Cover Art: HTTP " << status << " for " << url << std::endl;
     buffer.clear();
   }
   curl_easy_cleanup(curl);
@@ -2825,6 +2878,8 @@ void DownloadFile(const char* url, std::vector<char>& buffer) {
 void CoverArtWindow::SetImage(const char* image) {
 	if (image == image_) return;
 	image_ = image;
+	buffer_.clear();
+	image_needs_load_ = false;
 	if (!visible()) {
 		PlatformDeleteBitmap(bitmap_);
 		bitmap_ = NULL;
@@ -2850,6 +2905,7 @@ void CoverArtWindow::SetImage(const char* image) {
 			}
 			if (imageUrl == currentImageUrl) {
 				buffer_ = std::move(local_buffer);
+				image_needs_load_ = true;
 				Load();
 				Repaint();
 			}
@@ -2862,10 +2918,15 @@ void CoverArtWindow::SetImage(const char* image) {
 
 void CoverArtWindow::Load() {
   LoadPosition(main_window.screen_rect()->right, main_window.screen_rect()->bottom);
-	if (image_ == "") { return; }
+	if (!image_needs_load_) { return; }
+	image_needs_load_ = false;
 
 	PlatformDeleteBitmap(bitmap_);
-	bitmap_ = PlatformLoadBitmapFromBuf(buffer_.data(), buffer_.size());
+	bitmap_ = buffer_.empty() ? NULL : PlatformLoadBitmapFromBuf(buffer_.data(), buffer_.size());
+	if (!bitmap_ && !buffer_.empty()) {
+		std::cout << "[DEBUG] Cover Art: could not decode downloaded image ("
+		          << buffer_.size() << " bytes)" << std::endl;
+	}
 }
 
 void CoverArtWindow::GotImagePart(TspImageDownloadResult *part) {
@@ -2873,10 +2934,12 @@ void CoverArtWindow::GotImagePart(TspImageDownloadResult *part) {
   if (part->error == kTspErrorOk) {
     PlatformDeleteBitmap(bitmap_);
     bitmap_ = PlatformLoadBitmapFromBuf(accumulating_bytes_.data(),accumulating_bytes_.size());
+    accumulating_bytes_.clear();
     Repaint();
   } else if (part->error != kTspErrorInProgress) {
     PlatformDeleteBitmap(bitmap_);
     bitmap_ = NULL;
+    accumulating_bytes_.clear();
     Repaint();
   }
 }

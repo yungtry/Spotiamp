@@ -286,6 +286,7 @@ public:
 
 	int GetStringWidth(const char* s);
 	void DrawLetters(int x, int y, const char* s);
+	bool CloseButtonHot() const { return hover_button_ == 0; }
 private:
 	int FindButton(int x, int y);
 	int hover_button_;

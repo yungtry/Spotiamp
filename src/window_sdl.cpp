@@ -14,9 +14,21 @@
 #include "zipfile.h"
 #if defined(_WIN32)
 #include <windows.h>
+#include <wincodec.h>
 #undef DrawText
 #undef GetWindowText
 #undef SetWindowText
+#elif defined(__APPLE__)
+#define Rect MacRect
+#define Size MacSize
+#define Point MacPoint
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#undef Rect
+#undef Size
+#undef Point
+#include <dirent.h>
 #else
 #include <dirent.h>
 #endif
@@ -522,7 +534,49 @@ void PlatformWindow::SetPixel(int x, int y, unsigned int color) {
 }
 
 unsigned int PlatformWindow::GetBitmapPixel(Bitmap *src, int x, int y) {
-  return 0;
+  SDL_Surface *surf = (SDL_Surface*)src;
+  if (!surf || x < 0 || y < 0 || x >= surf->w || y >= surf->h)
+    return 0;
+
+  bool locked = false;
+  if (SDL_MUSTLOCK(surf)) {
+    if (SDL_LockSurface(surf) != 0)
+      return 0;
+    locked = true;
+  }
+
+  const int bpp = surf->format->BytesPerPixel;
+  Uint8 *p = (Uint8*)surf->pixels + y * surf->pitch + x * bpp;
+  Uint32 pixel = 0;
+  switch (bpp) {
+    case 1:
+      pixel = *p;
+      break;
+    case 2:
+      pixel = *(Uint16*)p;
+      break;
+    case 3:
+      if (SDL_BYTEORDER == SDL_BIG_ENDIAN)
+        pixel = p[0] << 16 | p[1] << 8 | p[2];
+      else
+        pixel = p[0] | p[1] << 8 | p[2] << 16;
+      break;
+    case 4:
+      pixel = *(Uint32*)p;
+      break;
+    default:
+      if (locked)
+        SDL_UnlockSurface(surf);
+      return 0;
+  }
+
+  Uint8 r = 0, g = 0, b = 0;
+  SDL_GetRGB(pixel, surf->format, &r, &g, &b);
+
+  if (locked)
+    SDL_UnlockSurface(surf);
+
+  return ((unsigned int)r << 16) | ((unsigned int)g << 8) | (unsigned int)b;
 }
 
 void PlatformWindow::Move(int l, int t) {
@@ -607,17 +661,138 @@ Size PlatformGetBitmapSize(Bitmap *bitmap) {
 }
 
 Bitmap *PlatformLoadBitmapFromBuf(const void *data, size_t data_size) {
+  if (!data || data_size == 0)
+    return NULL;
+
   SDL_RWops *rw = SDL_RWFromConstMem(data, data_size);
-  if (!rw) return NULL;
-  SDL_Surface *surf = SDL_LoadBMP_RW(rw, 1);
+  SDL_Surface *surf = rw ? SDL_LoadBMP_RW(rw, 1) : NULL;
   if (surf) {
     SDL_Surface *converted = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ARGB8888, 0);
     if (converted) {
       SDL_FreeSurface(surf);
       surf = converted;
     }
+    return (Bitmap*)surf;
   }
+
+#if defined(__APPLE__)
+  CFDataRef image_data = CFDataCreate(kCFAllocatorDefault, (const UInt8*)data, data_size);
+  if (!image_data)
+    return NULL;
+
+  CGImageSourceRef image_source = CGImageSourceCreateWithData(image_data, NULL);
+  CFRelease(image_data);
+  if (!image_source)
+    return NULL;
+
+  CGImageRef image = CGImageSourceCreateImageAtIndex(image_source, 0, NULL);
+  CFRelease(image_source);
+  if (!image)
+    return NULL;
+
+  const size_t width = CGImageGetWidth(image);
+  const size_t height = CGImageGetHeight(image);
+  if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+    CGImageRelease(image);
+    return NULL;
+  }
+
+  surf = SDL_CreateRGBSurfaceWithFormat(0, (int)width, (int)height, 32, SDL_PIXELFORMAT_ARGB8888);
+  if (!surf) {
+    CGImageRelease(image);
+    return NULL;
+  }
+
+  CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+  CGContextRef context = CGBitmapContextCreate(
+      surf->pixels,
+      width,
+      height,
+      8,
+      surf->pitch,
+      color_space,
+      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+  if (color_space)
+    CGColorSpaceRelease(color_space);
+
+  if (!context) {
+    SDL_FreeSurface(surf);
+    CGImageRelease(image);
+    return NULL;
+  }
+
+  CGContextClearRect(context, CGRectMake(0, 0, width, height));
+  CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+  CGContextRelease(context);
+  CGImageRelease(image);
   return (Bitmap*)surf;
+#elif defined(_WIN32)
+  HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  const bool should_uninitialize = SUCCEEDED(hr);
+  if (FAILED(hr) && hr != RPC_E_CHANGED_MODE)
+    return NULL;
+
+  IWICImagingFactory *factory = NULL;
+  hr = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                        IID_PPV_ARGS(&factory));
+  if (FAILED(hr) || !factory) {
+    if (should_uninitialize)
+      CoUninitialize();
+    return NULL;
+  }
+
+  IWICStream *stream = NULL;
+  hr = factory->CreateStream(&stream);
+  if (SUCCEEDED(hr))
+    hr = stream->InitializeFromMemory((BYTE*)data, (DWORD)data_size);
+
+  IWICBitmapDecoder *decoder = NULL;
+  if (SUCCEEDED(hr))
+    hr = factory->CreateDecoderFromStream(stream, NULL, WICDecodeMetadataCacheOnLoad, &decoder);
+
+  IWICBitmapFrameDecode *frame = NULL;
+  if (SUCCEEDED(hr))
+    hr = decoder->GetFrame(0, &frame);
+
+  IWICFormatConverter *converter = NULL;
+  if (SUCCEEDED(hr))
+    hr = factory->CreateFormatConverter(&converter);
+  if (SUCCEEDED(hr))
+    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+                               WICBitmapDitherTypeNone, NULL, 0.0,
+                               WICBitmapPaletteTypeCustom);
+
+  UINT width = 0;
+  UINT height = 0;
+  if (SUCCEEDED(hr))
+    hr = converter->GetSize(&width, &height);
+  if (SUCCEEDED(hr) && (width == 0 || height == 0 || width > 8192 || height > 8192))
+    hr = E_FAIL;
+
+  if (SUCCEEDED(hr)) {
+    surf = SDL_CreateRGBSurfaceWithFormat(0, (int)width, (int)height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!surf) {
+      hr = E_FAIL;
+    } else {
+      hr = converter->CopyPixels(NULL, surf->pitch, surf->pitch * height, (BYTE*)surf->pixels);
+      if (FAILED(hr)) {
+        SDL_FreeSurface(surf);
+        surf = NULL;
+      }
+    }
+  }
+
+  if (converter) converter->Release();
+  if (frame) frame->Release();
+  if (decoder) decoder->Release();
+  if (stream) stream->Release();
+  factory->Release();
+  if (should_uninitialize)
+    CoUninitialize();
+  return (Bitmap*)surf;
+#else
+  return NULL;
+#endif
 }
 
 static void PlatformPostProcessTextBitmap(Bitmap *bitmap) {
