@@ -55,6 +55,64 @@ static int g_drag_start_height;
 static PlatformWindow *g_captured_window = NULL;
 static bool HandleActiveMenuEvent(SDL_Event *event);
 
+static bool PlatformDirectoryExists(const std::string &path) {
+  struct stat st;
+  if (stat(path.c_str(), &st) != 0)
+    return false;
+#if defined(_WIN32)
+  return (st.st_mode & _S_IFDIR) != 0;
+#else
+  return S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool PlatformBasePathHasAssets(const std::string &base_path) {
+  return PlatformDirectoryExists(base_path + "assets/skins");
+}
+
+static void PlatformSetBasePath(const std::string &base_path) {
+  snprintf(exepath, MAX_PATH, "%s", base_path.c_str());
+}
+
+static void PlatformNormalizeBasePath() {
+  std::string base_path(exepath);
+  if (base_path.empty())
+    return;
+  if (base_path.back() != '/' && base_path.back() != '\\')
+    base_path += '/';
+
+  if (PlatformBasePathHasAssets(base_path)) {
+    PlatformSetBasePath(base_path);
+    return;
+  }
+
+#if defined(__APPLE__)
+  const std::string macos_part = "/Contents/MacOS/";
+  const std::string resources_part = "/Contents/Resources/";
+  size_t macos_pos = base_path.rfind(macos_part);
+  if (macos_pos != std::string::npos) {
+    std::string resources_path = base_path;
+    resources_path.replace(macos_pos, macos_part.size(), resources_part);
+    if (PlatformBasePathHasAssets(resources_path)) {
+      PlatformSetBasePath(resources_path);
+      return;
+    }
+  }
+
+  size_t resources_pos = base_path.rfind(resources_part);
+  if (resources_pos != std::string::npos) {
+    std::string macos_path = base_path;
+    macos_path.replace(resources_pos, resources_part.size(), macos_part);
+    if (PlatformBasePathHasAssets(macos_path)) {
+      PlatformSetBasePath(macos_path);
+      return;
+    }
+  }
+#endif
+
+  PlatformSetBasePath(base_path);
+}
+
 void PlatformWindow::UpdateActiveWindowDrag() {
   if (g_num_drag_windows <= 0)
     return;
@@ -513,6 +571,7 @@ int main(int argc, char *argv[]) {
     snprintf(exepath, MAX_PATH, "%s", base_path);
     SDL_free(base_path);
   }
+  PlatformNormalizeBasePath();
   PrefInit();
   InitSpotamp(argc, argv);
   

@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(SPOTIAMP_CARGO_TARGET "" CACHE STRING "Optional Cargo target triple for the Rust playback bridge")
+set(SPOTIAMP_ICON_ICO "${CMAKE_SOURCE_DIR}/assets/icon.ico")
 
 # ---------------------------------------------------------------------------
 # Credentials — generated at configure time from environment variables.
@@ -118,7 +119,7 @@ if(WIN32)
     enable_language(RC)
     list(APPEND SPOTIAMP_SRCS
         ${SRC_DIR}/windows_resources.rc
-        ${CMAKE_SOURCE_DIR}/assets/icon.ico
+        ${SPOTIAMP_ICON_ICO}
     )
     list(APPEND SPOTIAMP_PLATFORM_LIBS ws2_32 ntdll bcrypt userenv)
     if(MINGW)
@@ -131,6 +132,32 @@ endif()
 add_executable(spotiamp WIN32 ${SPOTIAMP_SRCS})
 
 target_compile_definitions(spotiamp PRIVATE WITH_SDL VERSION_STR="${PROJECT_VERSION}")
+
+if(APPLE)
+    set(SPOTIAMP_MACOS_ICNS "${CMAKE_BINARY_DIR}/spotiamp.icns")
+    add_custom_command(
+        OUTPUT "${SPOTIAMP_MACOS_ICNS}"
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/make_icns.py"
+                "${SPOTIAMP_ICON_ICO}"
+                "${SPOTIAMP_MACOS_ICNS}"
+        DEPENDS
+                "${SPOTIAMP_ICON_ICO}"
+                "${CMAKE_SOURCE_DIR}/scripts/make_icns.py"
+        COMMENT "Generating macOS app icon"
+        VERBATIM
+    )
+    add_custom_target(spotiamp_macos_icon DEPENDS "${SPOTIAMP_MACOS_ICNS}")
+    add_dependencies(spotiamp spotiamp_macos_icon)
+
+    set(SPOTIAMP_MACOS_BUNDLE_DIR "${CMAKE_BINARY_DIR}/Spotiamp.app")
+    set(SPOTIAMP_MACOS_INFO_PLIST "${CMAKE_BINARY_DIR}/Info.plist")
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/cmake/Info.plist.in"
+        "${SPOTIAMP_MACOS_INFO_PLIST}"
+        @ONLY
+    )
+endif()
 
 if(CARGO_EXECUTABLE AND NOT EXISTS "${CARGO_EXECUTABLE}")
     unset(CARGO_EXECUTABLE CACHE)
@@ -229,6 +256,30 @@ add_custom_command(TARGET spotiamp POST_BUILD
             "${CMAKE_SOURCE_DIR}/assets"
             "$<TARGET_FILE_DIR:spotiamp>/assets"
 )
+
+if(APPLE)
+    add_custom_command(TARGET spotiamp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/MacOS"
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "$<TARGET_FILE:spotiamp>"
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/MacOS/spotiamp"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${SPOTIAMP_MACOS_INFO_PLIST}"
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/Info.plist"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${SPOTIAMP_MACOS_ICNS}"
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/Resources/spotiamp.icns"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/assets"
+                "${SPOTIAMP_MACOS_BUNDLE_DIR}/Contents/Resources/assets"
+        COMMENT "Creating macOS app bundle"
+        VERBATIM
+    )
+endif()
 
 # Linking
 if(MINGW)

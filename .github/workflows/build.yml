@@ -20,12 +20,14 @@ jobs:
             artifact: spotiamp-windows
             executable: spotiamp.exe
             binary: build/app/Release/spotiamp.exe
+            bundle: ""
             toolchain: build/conan/build/generators/conan_toolchain.cmake
           - name: macOS
             os: macos-15
             artifact: spotiamp-macos
             executable: spotiamp
             binary: build/app/spotiamp
+            bundle: build/app/Spotiamp.app
             toolchain: build/conan/build/Release/generators/conan_toolchain.cmake
 
     env:
@@ -92,11 +94,14 @@ jobs:
         run: cmake --build build/app --config Release --parallel
 
       - name: Stage artifact
-        run: |
-          cmake -E make_directory dist/Spotiamp
-          cmake -E copy "${{ matrix.binary }}" "dist/Spotiamp/${{ matrix.executable }}"
-          cmake -E copy_directory assets dist/Spotiamp/assets
-          cmake -E copy LICENSE dist/Spotiamp/LICENSE
+        run: >-
+          cmake
+          "-DPROJECT_ROOT=${{ github.workspace }}"
+          "-DDIST_DIR=dist/Spotiamp"
+          "-DBINARY=${{ matrix.binary }}"
+          "-DEXECUTABLE=${{ matrix.executable }}"
+          "-DBUNDLE=${{ matrix.bundle }}"
+          -P cmake/StageArtifact.cmake
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
